@@ -21,6 +21,18 @@ describe("validateReportSections", () => {
     const text = REQUIRED_HEADINGS.slice(0, 4).map((h) => `${h}\nsome content`).join("\n\n");
     expect(validateReportSections(text)).toBe(false);
   });
+
+  it("accepts headings that differ only in case (e.g. markdown 'Step-by-Step' vs 'step-by-step')", () => {
+    const headingsWithCaseVariation = [
+      "1. System Summary",
+      "2. Top 5 Architectural Risks",
+      "3. Production Failure Scenarios",
+      "## 4. Refactor Plan (Step-by-Step)",
+      "5. SENIOR ENGINEER VERDICT",
+    ];
+    const text = headingsWithCaseVariation.map((h) => `${h}\nsome content`).join("\n\n");
+    expect(validateReportSections(text)).toBe(true);
+  });
 });
 
 describe("generateReport", () => {

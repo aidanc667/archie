@@ -11,7 +11,8 @@ export const REQUIRED_HEADINGS = [
 ];
 
 export function validateReportSections(text: string): boolean {
-  return REQUIRED_HEADINGS.every((heading) => text.includes(heading));
+  const lowerText = text.toLowerCase();
+  return REQUIRED_HEADINGS.every((heading) => lowerText.includes(heading.toLowerCase()));
 }
 
 const SYSTEM_PROMPT = `You are a Staff Engineer evaluating a codebase's architecture.
