@@ -22,6 +22,33 @@ integration, a web UI, or the two-pass critic pipeline.
 - Embeddings / vector DB
 - Architecture drift detection (requires historical tracking)
 
+## CLI interface
+
+```
+archie analyze <path> [options]
+
+Options:
+  --out <file>       Output path for the report (default: ./archie-report.md)
+  --topN <n>         Number of top-risk files included in full detail (default: tuned constant, see Summarizer)
+  --verbose          Print pipeline progress (file counts, graph stats, token usage) to stderr
+  --debug-graph      Dump the raw in-memory graph (nodes/edges) to <out>.graph.json alongside the report
+```
+
+## Deterministic/LLM boundary
+
+Everything up through the Summarizer (file walking, parsing, graph building,
+static analysis, risk scoring, Context Pack assembly) is deterministic code —
+no LLM involvement, fully unit-testable, reproducible given the same repo
+state. Claude is used **only** in the Reasoning layer, and only as a reasoning
+step over facts it's given — it does not see the raw repo or graph, only the
+Context Pack. The system prompt explicitly instructs Claude not to assert any
+file, function, dependency, or relationship that isn't present in the Context
+Pack, and to state "insufficient visibility" rather than infer or guess when
+the Context Pack lacks the detail needed to support a claim. This keeps
+architectural facts (what imports what, complexity numbers, fan-in/out)
+strictly deterministic and auditable, and confines the LLM to judgment and
+prioritization over those facts.
+
 ## Pipeline
 
 ```
@@ -90,9 +117,22 @@ Local repo path
    neighbors in full detail, with aggregate statistics (file count, total LOC,
    average complexity) for the rest. N is configurable but defaults to a value
    tuned to fit comfortably under Claude's context window alongside the system
-   prompt and report generation. If the selected detail set still exceeds the
-   token budget, the summarizer aggressively prunes lowest-risk nodes from the
-   detail set first (neighbors before top-N files) until it fits.
+   prompt and report generation.
+
+   **Token budget:** the Context Pack has a hard cap (default 50,000 tokens,
+   configurable). The summarizer builds it in two fallback modes, trying the
+   richer mode first and dropping down only if still over budget:
+   - **Mode 1 — top-N detail:** full per-file metrics + graph snapshot for the
+     top-N risk files and their immediate neighbors, as described below.
+     If this exceeds the budget, prune lowest-risk neighbors first, then
+     lowest-risk top-N files, until it fits or only the single highest-risk
+     file remains.
+   - **Mode 2 — cluster summary:** if even a single-file detail set exceeds
+     the budget (e.g. one file is enormous), fall back to dependency-cluster-
+     level aggregates only (cluster size, average complexity, max risk score
+     per cluster) with no per-file line-level detail.
+   If Mode 2 still exceeds budget, fail with a clear error rather than
+   silently truncating mid-structure — see Error handling.
 
    Produces a structured **LLM Context Pack** (not raw graph dump):
    - System summary (repo name, file count, total LOC, language)
@@ -129,6 +169,7 @@ Fail fast with a clear, actionable message for:
 - `ANTHROPIC_API_KEY` environment variable is missing
 - Claude API call fails (network/auth/rate-limit) — surface the error, no retry logic in v1
 - Claude response is missing one or more of the five required output sections — surface the raw response and an error, do not write `archie-report.md`
+- Context Pack still exceeds the token budget even in Mode 2 (cluster summary) — fail with an error naming the repo size/budget mismatch rather than silently truncating
 
 No fallback behavior beyond these checks — this is a CLI tool for direct use,
 not a service with uptime requirements.
