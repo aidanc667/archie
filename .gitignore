@@ -1,0 +1,4 @@
+node_modules/
+dist/
+*.log
+archie-report.md
