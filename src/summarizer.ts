@@ -18,6 +18,7 @@ export interface TopRiskFile {
   complexity: number;
   fanIn: number;
   loc: number;
+  source: string;
 }
 
 export interface ClusterSummary {
@@ -69,6 +70,7 @@ function buildClusterSummary(scores: RiskScore[]): ClusterSummary[] {
 export function buildContextPack(
   graph: CodeGraph,
   scores: RiskScore[],
+  sourceByPath: Map<string, string>,
   options: ContextPackOptions
 ): ContextPack {
   const paths = pathByFileId(graph);
@@ -85,6 +87,7 @@ export function buildContextPack(
       complexity: s.complexity,
       fanIn: s.fanIn,
       loc: s.loc,
+      source: sourceByPath.get(s.fileId) ?? "",
     }));
 
     const includedIds = new Set(topN.map((s) => s.fileId));
