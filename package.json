@@ -15,11 +15,13 @@
     "@anthropic-ai/sdk": "^0.32.0",
     "commander": "^12.1.0",
     "ignore": "^5.3.2",
+    "tree-sitter-javascript": "^0.25.0",
+    "tree-sitter-typescript": "^0.23.2",
     "web-tree-sitter": "^0.24.4"
   },
   "devDependencies": {
+    "@types/node": "^22.9.0",
     "typescript": "^5.6.3",
-    "vitest": "^2.1.4",
-    "@types/node": "^22.9.0"
+    "vitest": "^2.1.4"
   }
 }
