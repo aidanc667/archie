@@ -63,7 +63,7 @@ describe("buildContextPack", () => {
   it("incrementally prunes the lowest-risk file when budget fits 2 of 3 but not all 3", () => {
     const pack = buildContextPack(makeThreeFileGraph(), makeThreeFileScores(), new Map(), {
       topN: 3,
-      maxTokens: 89,
+      maxTokens: 95,
     });
 
     expect(pack.mode).toBe("top-n-detail");
@@ -97,5 +97,29 @@ describe("buildContextPack", () => {
 
     expect(pack.topRiskFiles).toHaveLength(1);
     expect(pack.topRiskFiles[0].source).toBe("");
+  });
+
+  it("sets hasTests=true on a top-risk file with a TESTED_BY edge, and false otherwise", () => {
+    const graph: CodeGraph = {
+      nodes: [
+        { kind: "file", id: "file:a.ts", path: "a.ts", loc: 100 },
+        { kind: "file", id: "file:a.test.ts", path: "a.test.ts", loc: 30 },
+        { kind: "file", id: "file:b.ts", path: "b.ts", loc: 10 },
+      ],
+      edges: [
+        { type: "TESTED_BY", from: "file:a.ts", to: "file:a.test.ts", confidence: 1.0 },
+      ],
+    };
+    const scores: RiskScore[] = [
+      { fileId: "file:a.ts", riskScore: 0.9, complexity: 10, fanIn: 0, loc: 100, dependencyDepth: 1 },
+      { fileId: "file:b.ts", riskScore: 0.5, complexity: 5, fanIn: 1, loc: 10, dependencyDepth: 0 },
+    ];
+
+    const pack = buildContextPack(graph, scores, new Map(), { topN: 2, maxTokens: 50000 });
+
+    const fileA = pack.topRiskFiles.find((f) => f.path === "a.ts");
+    const fileB = pack.topRiskFiles.find((f) => f.path === "b.ts");
+    expect(fileA?.hasTests).toBe(true);
+    expect(fileB?.hasTests).toBe(false);
   });
 });

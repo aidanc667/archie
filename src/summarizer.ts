@@ -19,6 +19,7 @@ export interface TopRiskFile {
   fanIn: number;
   loc: number;
   source: string;
+  hasTests: boolean;
 }
 
 export interface ClusterSummary {
@@ -50,6 +51,14 @@ function pathByFileId(graph: CodeGraph): Map<string, string> {
   return map;
 }
 
+function testedFileIds(graph: CodeGraph): Set<string> {
+  const set = new Set<string>();
+  for (const edge of graph.edges) {
+    if (edge.type === "TESTED_BY") set.add(edge.from);
+  }
+  return set;
+}
+
 function buildSystemSummary(graph: CodeGraph): SystemSummary {
   const fileNodes = graph.nodes.filter((n) => n.kind === "file");
   const totalLoc = fileNodes.reduce(
@@ -75,6 +84,7 @@ export function buildContextPack(
 ): ContextPack {
   const paths = pathByFileId(graph);
   const systemSummary = buildSystemSummary(graph);
+  const tested = testedFileIds(graph);
 
   const sorted = [...scores].sort((a, b) => b.riskScore - a.riskScore);
   let topN = sorted.slice(0, options.topN);
@@ -88,6 +98,7 @@ export function buildContextPack(
       fanIn: s.fanIn,
       loc: s.loc,
       source: sourceByPath.get(s.fileId) ?? "",
+      hasTests: tested.has(s.fileId),
     }));
 
     const includedIds = new Set(topN.map((s) => s.fileId));
