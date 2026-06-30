@@ -48,26 +48,75 @@ Local repo path
    where statically resolvable from the AST, function call relationships. Not a
    full type-checker — call resolution is best-effort, not exhaustive.
 
+   **Graph schema:**
+
+   Nodes:
+   - `FileNode` — `{ id, path, loc }`
+   - `FunctionNode` — `{ id, name, fileId, startLine, endLine }`
+   - `ClassNode` — `{ id, name, fileId, startLine, endLine }`
+
+   Edges:
+   - `CONTAINS` (FileNode → FunctionNode | ClassNode)
+   - `IMPORTS` (FileNode → FileNode)
+   - `CALLS` (FunctionNode → FunctionNode, best-effort resolution)
+   - `EXPORTS` (FileNode → FunctionNode | ClassNode)
+
+   Each edge carries a `confidence` field (0–1). Deterministic edges (`CONTAINS`,
+   `IMPORTS`, `EXPORTS`) are always 1.0. `CALLS` edges get 1.0 when resolved via
+   direct local-symbol reference, 0.5 when resolved heuristically (e.g. name
+   matches a single in-scope candidate among several). Confidence is not used
+   in v1 scoring logic — it's captured now so call-resolution quality can
+   improve later without a schema change.
+
 4. **Static analysis** — per file: lines of code, import fan-in count, import
    fan-out count, naive cyclomatic complexity (branch/loop/conditional counting
-   on the AST, not a full control-flow graph).
+   on the AST, not a full control-flow graph), and dependency depth (longest
+   import chain reachable from the file).
+
+   **Risk score** (per file, used for ranking in the summarizer):
+   ```
+   risk_score =
+     0.4 * normalized(complexity) +
+     0.3 * normalized(fan_in) +
+     0.2 * normalized(file_size) +
+     0.1 * normalized(dependency_depth)
+   ```
+   Each component is normalized to 0–1 against the repo's own distribution
+   (min-max scaling) before weighting, so the score is comparable across
+   repos of different sizes.
 
 5. **Summarizer** — large repos won't fit in an LLM context window. Ranks files
-   by risk signals (high fan-in, high complexity, large size) and includes the
-   top N files plus their immediate graph neighbors in full detail, with
-   aggregate statistics (file count, total LOC, average complexity) for the rest.
-   N is configurable but defaults to a value tuned to fit comfortably under
-   Claude's context window alongside the system prompt and report generation.
+   by `risk_score` and includes the top N files plus their immediate graph
+   neighbors in full detail, with aggregate statistics (file count, total LOC,
+   average complexity) for the rest. N is configurable but defaults to a value
+   tuned to fit comfortably under Claude's context window alongside the system
+   prompt and report generation. If the selected detail set still exceeds the
+   token budget, the summarizer aggressively prunes lowest-risk nodes from the
+   detail set first (neighbors before top-N files) until it fits.
+
+   Produces a structured **LLM Context Pack** (not raw graph dump):
+   - System summary (repo name, file count, total LOC, language)
+   - Top risk files (path, risk_score, contributing metrics)
+   - Graph snapshot (compressed: only CONTAINS/IMPORTS/CALLS edges touching
+     the detail set, as a compact adjacency list)
+   - Metrics table (per detail-set file: LOC, fan-in, fan-out, complexity)
+   - Key dependency clusters (groups of files with dense mutual IMPORTS edges)
 
 6. **Reasoning layer** — single Claude API call. System prompt instructs the
-   model to behave as a Staff Engineer evaluating system architecture, given the
-   summarized graph and metrics. Output follows the 5-part structure from the
-   product spec:
-   1. System understanding summary
-   2. Architectural risks (ranked)
-   3. What will break in production
-   4. Refactor plan (step-by-step, concrete)
-   5. Senior Engineer Verdict (one paragraph)
+   model to behave as a Staff Engineer evaluating system architecture, given
+   the LLM Context Pack. The prompt enforces a strict output schema — Claude
+   must always return exactly these five sections, in this order and these
+   headings, with no additional or reordered sections:
+   ```
+   1. System Summary
+   2. Top 5 Architectural Risks
+   3. Production Failure Scenarios
+   4. Refactor Plan (step-by-step)
+   5. Senior Engineer Verdict
+   ```
+   If the response doesn't contain all five expected headings, the CLI treats
+   it as a failed generation and surfaces an error rather than writing a
+   malformed report (no retry loop in v1 — see Error handling).
 
 7. **Output** — writes the report to `archie-report.md` in the current working
    directory by default, or to a path given via `--out`.
@@ -79,6 +128,7 @@ Fail fast with a clear, actionable message for:
 - No parseable TS/JS files found
 - `ANTHROPIC_API_KEY` environment variable is missing
 - Claude API call fails (network/auth/rate-limit) — surface the error, no retry logic in v1
+- Claude response is missing one or more of the five required output sections — surface the raw response and an error, do not write `archie-report.md`
 
 No fallback behavior beyond these checks — this is a CLI tool for direct use,
 not a service with uptime requirements.
