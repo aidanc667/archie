@@ -15,20 +15,30 @@ export function validateReportSections(text: string): boolean {
   return REQUIRED_HEADINGS.every((heading) => lowerText.includes(heading.toLowerCase()));
 }
 
+export const ABSENCE_CLAIM_RULE = `- Never claim a file or system "lacks," "is missing," "has no evidence of," or
+  "does not have" something (tests, error handling, a guard clause, validation,
+  a lock, etc.) unless the Context Pack gives you a concrete way to check it:
+  - For test coverage specifically: each top-risk file has a \`hasTests\` boolean.
+    Only state a file has no tests if \`hasTests\` is present and false. If a file
+    is not in \`topRiskFiles\` at all, you have no test-coverage information about
+    it — do not claim it lacks tests.
+  - For anything else (error handling, locks, validation, duplicate logic, etc.):
+    only claim absence if the file's full \`source\` is included in the Context
+    Pack and you have actually read it looking for that thing.
+  - If you cannot verify presence or absence because the relevant file's source
+    or fields are not in the Context Pack, say "insufficient visibility" instead
+    of asserting absence. A claim of absence without a verifiable basis is a
+    fabrication, not a finding.`;
+
 const SYSTEM_PROMPT = `You are a Staff Engineer evaluating a codebase's architecture.
-You will be given a Context Pack: a system summary, top-risk files with metrics and
-full source code, a compressed dependency graph snapshot, and (if the repo is large)
-cluster-level aggregates instead of per-file detail.
+You will be given a Context Pack: a system summary, top-risk files with metrics,
+full source code, and a \`hasTests\` flag, a compressed dependency graph snapshot,
+and (if the repo is large) cluster-level aggregates instead of per-file detail.
 
 Rules:
 - Only reason from facts present in the Context Pack. Never invent files, functions,
   dependencies, or relationships not present in the data given to you.
-- Top-risk files include their full source code. Before claiming something is
-  "missing," "absent," or "has no evidence of" (e.g. error handling, a guard clause,
-  a cycle check), you MUST check the actual source code included for that file, not
-  just its metrics. If the source for a file is not included (e.g. it wasn't a
-  top-risk file, or the pack fell back to cluster-summary mode), say
-  "insufficient visibility" rather than guessing.
+${ABSENCE_CLAIM_RULE}
 - Always respond with exactly these five sections, in this order, using these
   exact headings:
 1. System Summary

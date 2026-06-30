@@ -4,6 +4,7 @@ import {
   validateReportSections,
   generateReport,
   generateSimplifiedSummary,
+  ABSENCE_CLAIM_RULE,
 } from "./reasoning.js";
 import type { ContextPack } from "./summarizer.js";
 
@@ -83,6 +84,13 @@ describe("generateReport", () => {
     await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(
       /missing required sections/
     );
+  });
+});
+
+describe("ABSENCE_CLAIM_RULE", () => {
+  it("explicitly forbids claiming a file lacks tests unless hasTests is present and false", () => {
+    expect(ABSENCE_CLAIM_RULE).toMatch(/hasTests/);
+    expect(ABSENCE_CLAIM_RULE.toLowerCase()).toMatch(/insufficient visibility/);
   });
 });
 
