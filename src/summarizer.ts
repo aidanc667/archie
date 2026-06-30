@@ -34,7 +34,9 @@ export interface ContextPack {
   clusters: ClusterSummary[];
 }
 
-// Rough token estimate: ~4 characters per token.
+// Rough token estimate: ~4 characters per token. This measures the length of the
+// JSON-serialized pack, not actual LLM prompt formatting, so it's an approximation
+// that may diverge from real prompt token counts.
 function estimateTokens(pack: Omit<ContextPack, "mode">): number {
   return Math.ceil(JSON.stringify(pack).length / 4);
 }
