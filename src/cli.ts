@@ -38,7 +38,8 @@ program
           console.error(`Graph dumped to ${graphPath}`);
         }
       } catch (error) {
-        console.error(`archie: ${(error as Error).message}`);
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`archie: ${message}`);
         process.exitCode = 1;
       }
     }
