@@ -36,27 +36,45 @@ export function computeDependencyDepth(graph: CodeGraph): Map<string, number> {
     adjacency.get(edge.from)?.push(edge.to);
   }
 
-  const depthCache = new Map<string, number>();
-
-  function depthOf(fileId: string, visiting: Set<string>): number {
-    if (depthCache.has(fileId)) return depthCache.get(fileId)!;
-    if (visiting.has(fileId)) return 0; // cycle guard
-    visiting.add(fileId);
-
-    const neighbors = adjacency.get(fileId) ?? [];
-    let max = 0;
+  // Run Kahn's on the reversed graph so depth means "longest chain below this node".
+  // Leaves (files that import nothing) start at depth 0; a file's depth is
+  // 1 + max(depths of its direct imports). Cycle edges are ignored — nodes stuck
+  // in a cycle are never dequeued and stay at depth 0.
+  const reverseAdj = new Map<string, string[]>();
+  const inDegree = new Map<string, number>();
+  for (const fileId of adjacency.keys()) {
+    reverseAdj.set(fileId, []);
+    inDegree.set(fileId, 0);
+  }
+  for (const [fileId, neighbors] of adjacency) {
     for (const neighbor of neighbors) {
-      max = Math.max(max, 1 + depthOf(neighbor, visiting));
+      reverseAdj.get(neighbor)!.push(fileId);
+      inDegree.set(fileId, (inDegree.get(fileId) ?? 0) + 1);
     }
-    visiting.delete(fileId);
-    depthCache.set(fileId, max);
-    return max;
+  }
+
+  const depth = new Map<string, number>();
+  for (const fileId of adjacency.keys()) depth.set(fileId, 0);
+
+  const queue: string[] = [];
+  for (const [fileId, deg] of inDegree) {
+    if (deg === 0) queue.push(fileId);
+  }
+
+  while (queue.length > 0) {
+    const fileId = queue.shift()!;
+    const currentDepth = depth.get(fileId)!;
+    for (const parent of reverseAdj.get(fileId) ?? []) {
+      const next = Math.max(depth.get(parent) ?? 0, currentDepth + 1);
+      depth.set(parent, next);
+      const remaining = inDegree.get(parent)! - 1;
+      inDegree.set(parent, remaining);
+      if (remaining === 0) queue.push(parent);
+    }
   }
 
   const result = new Map<string, number>();
-  for (const fileId of adjacency.keys()) {
-    result.set(fileId, depthOf(fileId, new Set()));
-  }
+  for (const [fileId, d] of depth) result.set(fileId, d);
   return result;
 }
 
