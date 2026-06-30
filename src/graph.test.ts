@@ -93,4 +93,51 @@ describe("buildGraph", () => {
     expect(importEdges[0].from).toBe("file:src/a.ts");
     expect(importEdges[0].to).toBe("file:src/b.ts");
   });
+
+  it("emits a TESTED_BY edge from a source file to its same-directory .test.ts file", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/src/metrics.ts",
+        { loc: 20, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+      [
+        "/repo/src/metrics.test.ts",
+        { loc: 15, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo");
+
+    const testedByEdges = graph.edges.filter((e) => e.type === "TESTED_BY");
+    expect(testedByEdges).toHaveLength(1);
+    expect(testedByEdges[0].from).toBe("file:src/metrics.ts");
+    expect(testedByEdges[0].to).toBe("file:src/metrics.test.ts");
+  });
+
+  it("emits a TESTED_BY edge for .spec. files too, and does not emit one when no test file exists", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/src/walker.ts",
+        { loc: 20, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+      [
+        "/repo/src/walker.spec.ts",
+        { loc: 15, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+      [
+        "/repo/src/orphan.ts",
+        { loc: 5, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo");
+
+    const testedByEdges = graph.edges.filter((e) => e.type === "TESTED_BY");
+    expect(testedByEdges).toHaveLength(1);
+    expect(testedByEdges[0].from).toBe("file:src/walker.ts");
+    expect(testedByEdges[0].to).toBe("file:src/walker.spec.ts");
+
+    const orphanHasTest = testedByEdges.some((e) => e.from === "file:src/orphan.ts");
+    expect(orphanHasTest).toBe(false);
+  });
 });

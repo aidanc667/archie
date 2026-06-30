@@ -33,6 +33,21 @@ function resolveImport(
   return undefined;
 }
 
+const TEST_SUFFIX_RE = /\.(test|spec)\.(ts|tsx|js|jsx)$/;
+
+function testTargetKey(relPath: string): string {
+  const dir = path.dirname(relPath);
+  const base = path.basename(relPath).replace(TEST_SUFFIX_RE, "");
+  return path.join(dir, base);
+}
+
+function sourceKey(relPath: string): string {
+  const dir = path.dirname(relPath);
+  const ext = path.extname(relPath);
+  const base = path.basename(relPath, ext);
+  return path.join(dir, base);
+}
+
 export function buildGraph(
   parsedByFile: Map<string, FileEntry>,
   root: string
@@ -97,6 +112,26 @@ export function buildGraph(
     }
     for (const targetId of resolvedTargets) {
       edges.push({ type: "IMPORTS", from: fileId, to: targetId, confidence: 1.0 });
+    }
+  }
+
+  // Pass 4: TESTED_BY edges — link each non-test source file to a same-directory
+  // test file matching the `<name>.test.<ext>` / `<name>.spec.<ext>` convention.
+  // This makes "has tests" a checkable graph fact instead of something the LLM
+  // has to infer from the file's absence in the context pack.
+  const testFileIdByKey = new Map<string, string>();
+  for (const absPath of parsedByFile.keys()) {
+    const relPath = path.relative(root, absPath);
+    if (TEST_SUFFIX_RE.test(relPath)) {
+      testFileIdByKey.set(testTargetKey(relPath), fileIdByAbsPath.get(absPath)!);
+    }
+  }
+  for (const absPath of parsedByFile.keys()) {
+    const relPath = path.relative(root, absPath);
+    if (TEST_SUFFIX_RE.test(relPath)) continue;
+    const testFileId = testFileIdByKey.get(sourceKey(relPath));
+    if (testFileId) {
+      edges.push({ type: "TESTED_BY", from: fileIdByAbsPath.get(absPath)!, to: testFileId, confidence: 1.0 });
     }
   }
 
