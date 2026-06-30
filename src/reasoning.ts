@@ -34,6 +34,11 @@ Rules:
 5. Senior Engineer Verdict
 Do not add, omit, or reorder sections.`;
 
+function extractTextBlock(response: Anthropic.Messages.Message): string {
+  const textBlock = response.content.find((block) => block.type === "text");
+  return textBlock && "text" in textBlock ? textBlock.text : "";
+}
+
 export async function generateReport(
   client: Anthropic,
   pack: ContextPack
@@ -45,8 +50,7 @@ export async function generateReport(
     messages: [{ role: "user", content: JSON.stringify(pack, null, 2) }],
   });
 
-  const textBlock = response.content.find((block) => block.type === "text");
-  const text = textBlock && "text" in textBlock ? textBlock.text : "";
+  const text = extractTextBlock(response);
 
   if (!validateReportSections(text)) {
     throw new Error(
@@ -79,8 +83,7 @@ export async function generateSimplifiedSummary(
     messages: [{ role: "user", content: technicalReport }],
   });
 
-  const textBlock = response.content.find((block) => block.type === "text");
-  const text = textBlock && "text" in textBlock ? textBlock.text : "";
+  const text = extractTextBlock(response);
 
   if (text.trim().length < MIN_SUMMARY_LENGTH) {
     throw new Error(
