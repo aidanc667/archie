@@ -21,6 +21,11 @@ export interface PipelineOptions {
 export interface PipelineResult {
   report: string;
   graph: CodeGraph;
+  /**
+   * Present when `generatePdf` is set. This is simplified summary text only —
+   * `runPipeline` never writes a PDF file. Callers who want a PDF should pass
+   * this text to `convertToPdf` (from `./pdf.js`) themselves; see `src/cli.ts`.
+   */
   simplifiedSummary?: string;
 }
 
