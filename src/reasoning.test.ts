@@ -1,6 +1,10 @@
 // src/reasoning.test.ts
 import { describe, it, expect, vi } from "vitest";
-import { validateReportSections, generateReport } from "./reasoning.js";
+import {
+  validateReportSections,
+  generateReport,
+  generateSimplifiedSummary,
+} from "./reasoning.js";
 import type { ContextPack } from "./summarizer.js";
 
 const REQUIRED_HEADINGS = [
@@ -79,5 +83,37 @@ describe("generateReport", () => {
     await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(
       /missing required sections/
     );
+  });
+});
+
+describe("generateSimplifiedSummary", () => {
+  it("returns the simplified text from a normal response", async () => {
+    const simplifiedText =
+      "# What This System Does\n\nThis tool checks code quality.\n\n# Bottom Line\n\nWorks fine, some cleanup needed.";
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [{ type: "text", text: simplifiedText }],
+        }),
+      },
+    };
+
+    const result = await generateSimplifiedSummary(fakeClient as any, "## 1. System Summary\nDetailed technical report content here.");
+    expect(result).toBe(simplifiedText);
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when the response is suspiciously short", async () => {
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [{ type: "text", text: "too short" }],
+        }),
+      },
+    };
+
+    await expect(
+      generateSimplifiedSummary(fakeClient as any, "## 1. System Summary\nDetailed technical report content here.")
+    ).rejects.toThrow(/too short/i);
   });
 });

@@ -56,3 +56,37 @@ export async function generateReport(
 
   return text;
 }
+
+const MIN_SUMMARY_LENGTH = 100;
+
+const SIMPLIFIED_SUMMARY_SYSTEM_PROMPT = `You are translating a technical software architecture report into a short summary for a non-technical reader — e.g. a founder, product manager, or investor evaluating the team and product, not the code.
+
+Rules:
+- No jargon, no file paths, no line numbers, no complexity scores or other code-level metrics.
+- Focus on business-level risk: what could go wrong for users or the company, not what could go wrong in a specific function.
+- Keep it short — roughly a third to a half the length of the original report. It should be readable in about two minutes.
+- Use a loose, readable structure: what the system does, the 2-3 things most worth worrying about, and the bottom-line recommendation. Do not use the original report's five-section heading structure.
+- Base everything on the technical report given to you. Do not invent details not present in it.`;
+
+export async function generateSimplifiedSummary(
+  client: Anthropic,
+  technicalReport: string
+): Promise<string> {
+  const response = await client.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 2048,
+    system: SIMPLIFIED_SUMMARY_SYSTEM_PROMPT,
+    messages: [{ role: "user", content: technicalReport }],
+  });
+
+  const textBlock = response.content.find((block) => block.type === "text");
+  const text = textBlock && "text" in textBlock ? textBlock.text : "";
+
+  if (text.trim().length < MIN_SUMMARY_LENGTH) {
+    throw new Error(
+      `Simplified summary response is too short (${text.trim().length} chars, expected at least ${MIN_SUMMARY_LENGTH}). Raw response:\n${text}`
+    );
+  }
+
+  return text;
+}
