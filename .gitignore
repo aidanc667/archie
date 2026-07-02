@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.log
 archie-report.md
+.archie-cache/
+.DS_Store
