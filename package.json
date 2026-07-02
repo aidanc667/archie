@@ -1,7 +1,13 @@
 {
   "name": "archie",
+  "description": "AI Staff Engineer architecture analysis for a local repo",
   "version": "0.1.0",
   "private": true,
+  "keywords": ["cli", "architecture", "code-analysis", "static-analysis", "claude", "ai"],
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "bin": {
     "archie": "./dist/cli.js"
@@ -17,6 +23,7 @@
     "ignore": "^5.3.2",
     "md-to-pdf": "^5.2.5",
     "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-python": "^0.25.0",
     "tree-sitter-typescript": "^0.23.2",
     "web-tree-sitter": "^0.24.4"
   },
