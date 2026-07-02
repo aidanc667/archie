@@ -111,6 +111,33 @@ const PDF_CSS = `
     margin: 28px 0;
   }
 
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 10.5pt;
+  }
+
+  th {
+    background: #f5f3ff;
+    color: #1a1a2e;
+    font-weight: 600;
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 2px solid #6366f1;
+  }
+
+  td {
+    padding: 8px 12px;
+    color: #374151;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  tr:last-child td {
+    border-bottom: none;
+  }
+
   /* Page footer */
   @page {
     margin: 18mm 20mm 22mm 20mm;

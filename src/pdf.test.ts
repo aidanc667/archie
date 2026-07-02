@@ -18,4 +18,20 @@ describe("convertToPdf", () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 30000);
+
+  it("writes a non-empty PDF file from markdown content containing a table", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "archie-pdf-test-"));
+    const outPath = path.join(dir, "summary.pdf");
+    try {
+      await convertToPdf(
+        "# Test\n\n| Metric | Value |\n|--------|-------|\n| Files | 10 |\n",
+        outPath
+      );
+
+      const buf = await readFile(outPath);
+      expect(buf.subarray(0, 4).toString()).toBe("%PDF");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30000);
 });
