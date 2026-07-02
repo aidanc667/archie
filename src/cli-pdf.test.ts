@@ -28,4 +28,22 @@ describe("archie analyze --pdf (CLI integration)", () => {
       code: 1,
     });
   });
+
+  it("shows the --json flag in help output", async () => {
+    const cliPath = path.resolve("dist/cli.js");
+    const { stdout } = await execFileAsync("node", [cliPath, "analyze", "--help"]);
+    expect(stdout).toContain("--json");
+  });
+
+  it("fails cleanly (non-zero exit, no partial JSON on stdout) when --json is passed but ANTHROPIC_API_KEY is missing", async () => {
+    const cliPath = path.resolve("dist/cli.js");
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+
+    await expect(
+      execFileAsync("node", [cliPath, "analyze", "fixtures/parser-basic", "--json"], { env })
+    ).rejects.toMatchObject({
+      code: 1,
+    });
+  });
 });
