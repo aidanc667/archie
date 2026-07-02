@@ -63,7 +63,7 @@ describe("buildContextPack", () => {
   it("incrementally prunes the lowest-risk file when budget fits 2 of 3 but not all 3", () => {
     const pack = buildContextPack(makeThreeFileGraph(), makeThreeFileScores(), new Map(), {
       topN: 3,
-      maxTokens: 95,
+      maxTokens: 110,
     });
 
     expect(pack.mode).toBe("top-n-detail");
@@ -121,5 +121,22 @@ describe("buildContextPack", () => {
     const fileB = pack.topRiskFiles.find((f) => f.path === "b.ts");
     expect(fileA?.hasTests).toBe(true);
     expect(fileB?.hasTests).toBe(false);
+  });
+
+  it("sets hasErrorHandling=true for a file with a try/catch block, and false otherwise", () => {
+    const sourceByPath = new Map<string, string>([
+      ["file:a.ts", "function a() { try { risky(); } catch (e) { handle(e); } }"],
+      ["file:b.ts", "function b() { return 2; }"],
+    ]);
+
+    const pack = buildContextPack(makeGraph(), makeScores(), sourceByPath, {
+      topN: 2,
+      maxTokens: 50000,
+    });
+
+    const fileA = pack.topRiskFiles.find((f) => f.path === "a.ts");
+    const fileB = pack.topRiskFiles.find((f) => f.path === "b.ts");
+    expect(fileA?.hasErrorHandling).toBe(true);
+    expect(fileB?.hasErrorHandling).toBe(false);
   });
 });

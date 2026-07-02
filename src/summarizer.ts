@@ -20,6 +20,7 @@ export interface TopRiskFile {
   loc: number;
   source: string;
   hasTests: boolean;
+  hasErrorHandling: boolean;
 }
 
 export interface ClusterSummary {
@@ -59,6 +60,24 @@ function testedFileIds(graph: CodeGraph): Set<string> {
   return set;
 }
 
+function hasErrorHandling(source: string): boolean {
+  return /\btry\s*\{/.test(source) || /\.catch\s*\(/.test(source);
+}
+
+function buildSignatureSummary(graph: CodeGraph, fileId: string): string {
+  const functions: string[] = [];
+  const classes: string[] = [];
+  for (const node of graph.nodes) {
+    if (node.kind === "function" && node.fileId === fileId) functions.push(node.name);
+    else if (node.kind === "class" && node.fileId === fileId) classes.push(node.name);
+  }
+  if (functions.length === 0 && classes.length === 0) return "[no exports detected]";
+  const parts: string[] = [];
+  if (functions.length > 0) parts.push(`[functions: ${functions.join(", ")}]`);
+  if (classes.length > 0) parts.push(`[classes: ${classes.join(", ")}]`);
+  return parts.join(" ");
+}
+
 function buildSystemSummary(graph: CodeGraph): SystemSummary {
   const fileNodes = graph.nodes.filter((n) => n.kind === "file");
   const totalLoc = fileNodes.reduce(
@@ -91,14 +110,17 @@ export function buildContextPack(
 
   // Mode 1: top-N detail, pruning lowest-risk entries until it fits.
   while (topN.length > 0) {
-    const topRiskFiles: TopRiskFile[] = topN.map((s) => ({
+    const topRiskFiles: TopRiskFile[] = topN.map((s, index) => ({
       path: paths.get(s.fileId) ?? s.fileId,
       riskScore: s.riskScore,
       complexity: s.complexity,
       fanIn: s.fanIn,
       loc: s.loc,
-      source: sourceByPath.get(s.fileId) ?? "",
+      source: index < 3
+        ? (sourceByPath.get(s.fileId) ?? "")
+        : buildSignatureSummary(graph, s.fileId),
       hasTests: tested.has(s.fileId),
+      hasErrorHandling: hasErrorHandling(sourceByPath.get(s.fileId) ?? ""),
     }));
 
     const includedIds = new Set(topN.map((s) => s.fileId));

@@ -22,7 +22,12 @@ export const ABSENCE_CLAIM_RULE = `- Never claim a file or system "lacks," "is m
     Only state a file has no tests if \`hasTests\` is present and false. If a file
     is not in \`topRiskFiles\` at all, you have no test-coverage information about
     it — do not claim it lacks tests.
-  - For anything else (error handling, locks, validation, duplicate logic, etc.):
+  - For error handling specifically: each top-risk file has a \`hasErrorHandling\`
+    boolean (true if the source contains a \`try\` block or a \`.catch(\` call —
+    a heuristic check, not exhaustive). Only state a file has no error handling
+    if \`hasErrorHandling\` is present and false. Do not claim a file lacks error
+    handling based on absence from \`topRiskFiles\` alone.
+  - For anything else (guard clauses, validation, locks, duplicate logic, etc.):
     only claim absence if the file's full \`source\` is included in the Context
     Pack and you have actually read it looking for that thing.
   - If you cannot verify presence or absence because the relevant file's source
@@ -116,31 +121,179 @@ Write a final assessment covering:
 - **Recommended first action:** Exactly one thing the team should do this week, specific enough to assign to a developer.
 - A closing paragraph (3-5 sentences) that gives an honest overall picture — is this codebase ready to scale, or does it need foundational work first? Who is this team, based on what you see? What trajectory are they on?`;
 
+interface RiskFinding {
+  title: string;
+  file: string;
+  severity: "Critical" | "High" | "Medium";
+  confidence: "high" | "medium" | "low";
+  why_it_matters: string;
+  root_cause: string;
+  evidence: string;
+}
+
+const REPORT_RISKS_TOOL: Anthropic.Tool = {
+  name: "report_risks",
+  description: "Report the top architectural risks as structured data.",
+  input_schema: {
+    type: "object",
+    properties: {
+      risks: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            title: { type: "string" },
+            file: { type: "string" },
+            severity: { type: "string", enum: ["Critical", "High", "Medium"] },
+            confidence: { type: "string", enum: ["high", "medium", "low"] },
+            why_it_matters: { type: "string" },
+            root_cause: { type: "string" },
+            evidence: { type: "string" },
+          },
+          required: [
+            "title",
+            "file",
+            "severity",
+            "confidence",
+            "why_it_matters",
+            "root_cause",
+            "evidence",
+          ],
+        },
+      },
+    },
+    required: ["risks"],
+  },
+};
+
+const CONFIDENCE_RULES = `Confidence scoring for each risk:
+- "high": the finding cites a file whose full \`source\` is in the context pack (i.e. it's in the top-3 detail files)
+- "medium": the finding cites a file that is in \`topRiskFiles\` but has a signature summary only (not full source)
+- "low": the finding is based on graph topology/metrics alone without source visibility
+
+For each risk, also provide:
+- "severity": one of Critical / High / Medium, based on the real-world consequence and blast radius of this risk materialising.
+- "root_cause": 1-2 sentences on the specific technical reason this is risky. Reference the metric or source code evidence, e.g. "fanIn=14 means 14 files depend on this module — a breaking change here cascades across the entire codebase."`;
+
 function extractTextBlock(response: Anthropic.Messages.Message): string {
   const textBlock = response.content.find((block) => block.type === "text");
   return textBlock && "text" in textBlock ? textBlock.text : "";
 }
 
+const SEVERITY_PRIORITY: Record<RiskFinding["severity"], number> = {
+  Critical: 0,
+  High: 1,
+  Medium: 2,
+};
+
+const CONFIDENCE_CAVEATS: Record<"medium" | "low", string> = {
+  low: "*Confidence: based on graph structure and metrics only — full source wasn't available to verify this finding directly.*",
+  medium:
+    "*Confidence: based on a partial view of this file (signature summary, not full source) — treat as directionally correct pending closer review.*",
+};
+
+function formatRisksSection(risks: RiskFinding[]): string {
+  const sortedRisks = [...risks].sort(
+    (a, b) => SEVERITY_PRIORITY[a.severity] - SEVERITY_PRIORITY[b.severity]
+  );
+
+  const lines = ["## 2. Top 5 Architectural Risks", ""];
+  sortedRisks.forEach((risk, i) => {
+    lines.push(`### Risk ${i + 1}: ${risk.title} — \`${risk.file}\``);
+    lines.push(`**Severity:** ${risk.severity}`);
+    lines.push(`**Why this matters:** ${risk.why_it_matters}`);
+    lines.push(`**Root cause:** ${risk.root_cause}`);
+    lines.push(`**Evidence:** ${risk.evidence}`);
+    if (risk.confidence === "medium" || risk.confidence === "low") {
+      lines.push(CONFIDENCE_CAVEATS[risk.confidence]);
+    }
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export async function generateReport(
   client: Anthropic,
   pack: ContextPack
-): Promise<string> {
-  const response = await client.messages.create({
+): Promise<{ report: string; usage: TokenUsage }> {
+  // Pass 1: structured risks via tool use
+  const risksResponse = await client.messages.create({
     model: "claude-sonnet-4-6",
-    max_tokens: 8192,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: "user", content: JSON.stringify(pack, null, 2) }],
+    max_tokens: 4096,
+    system: `${SYSTEM_PROMPT}\n\n${CONFIDENCE_RULES}`,
+    messages: [
+      {
+        role: "user",
+        content: `Identify the top architectural risks in this codebase. Use the report_risks tool.\n\n${JSON.stringify(pack, null, 2)}`,
+      },
+    ],
+    tools: [REPORT_RISKS_TOOL],
+    tool_choice: { type: "tool", name: "report_risks" },
   });
 
-  const text = extractTextBlock(response);
+  const toolUseBlock = risksResponse.content.find(
+    (block) => block.type === "tool_use" && block.name === "report_risks"
+  );
+  if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
+    throw new Error("Claude did not call report_risks tool as expected.");
+  }
+  const risks = (toolUseBlock.input as { risks: RiskFinding[] }).risks;
 
-  if (!validateReportSections(text)) {
+  const risksSection = formatRisksSection(risks);
+
+  // Pass 2: remaining sections with structured risks as context
+  const remainingSectionsPrompt = `You are writing an architecture report. The "Top 5 Architectural Risks" section has already been generated (shown below). Write only sections 1, 3, 4, and 5 — do NOT include section 2.
+
+Here are the structured risks for your reference when writing sections 3, 4, and 5:
+${JSON.stringify(risks, null, 2)}
+
+Context Pack:
+${JSON.stringify(pack, null, 2)}
+
+Write exactly these four sections with these exact headings (no section 2):
+## 1. System Summary
+## 3. Production Failure Scenarios
+## 4. Refactor Plan (step-by-step)
+## 5. Senior Engineer Verdict`;
+
+  const remainingResponse = await client.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 6144,
+    system: SYSTEM_PROMPT,
+    messages: [{ role: "user", content: remainingSectionsPrompt }],
+  });
+
+  const remainingText = extractTextBlock(remainingResponse);
+
+  // Assemble final report: inject risks section between section 1 and section 3
+  const section1Match = remainingText.match(/(## 1\. System Summary[\s\S]*?)(?=## 3\.)/);
+  const section345Match = remainingText.match(/(## 3\.[\s\S]*)/);
+
+  let finalReport: string;
+  if (section1Match && section345Match) {
+    finalReport = `${section1Match[1].trimEnd()}\n\n${risksSection}\n\n${section345Match[1]}`;
+  } else {
+    // Fallback: prepend risks section to the response
+    finalReport = `${remainingText.split("## 3.")[0].trimEnd()}\n\n${risksSection}\n\n## 3.${remainingText.split("## 3.").slice(1).join("## 3.")}`;
+  }
+
+  if (!validateReportSections(finalReport)) {
     throw new Error(
-      `Claude response is missing required sections. Raw response:\n${text}`
+      `Assembled report is missing required sections. Raw response:\n${finalReport}`
     );
   }
 
-  return text;
+  const usage: TokenUsage = {
+    inputTokens: risksResponse.usage.input_tokens + remainingResponse.usage.input_tokens,
+    outputTokens: risksResponse.usage.output_tokens + remainingResponse.usage.output_tokens,
+  };
+
+  return { report: finalReport, usage };
 }
 
 const MIN_SUMMARY_LENGTH = 100;
@@ -200,7 +353,7 @@ Rules:
 export async function generateSimplifiedSummary(
   client: Anthropic,
   technicalReport: string
-): Promise<string> {
+): Promise<{ summary: string; usage: TokenUsage }> {
   const response = await client.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 2048,
@@ -216,5 +369,10 @@ export async function generateSimplifiedSummary(
     );
   }
 
-  return text;
+  const usage: TokenUsage = {
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
+  };
+
+  return { summary: text, usage };
 }
