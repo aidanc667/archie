@@ -1,5 +1,6 @@
 // src/graph.ts
 import path from "node:path";
+import { readFile } from "node:fs/promises";
 import type { CodeGraph, GraphNode, Edge, FileNode } from "./types.js";
 import type { ParsedFile } from "./parser.js";
 
@@ -8,36 +9,194 @@ export interface FileEntry {
   parsed: ParsedFile;
 }
 
+// A single tsconfig/jsconfig "paths" mapping entry, pre-split around its `*`
+// wildcard (if any) so lookups at resolve time are a cheap prefix/suffix check.
+export interface PathAliasRule {
+  prefix: string;
+  suffix: string;
+  hasWildcard: boolean;
+  // Absolute path templates (still containing a literal `*` for wildcard
+  // rules) to try in order, mirroring how TypeScript tries each target.
+  targets: string[];
+}
+
+// Strips `//` and `/* */` comments from JSONC while tracking whether the
+// scanner is inside a string literal, so comment-marker-like substrings
+// inside string values (e.g. the `/*` inside a completely ordinary tsconfig
+// glob like `"./src/*"`) are left alone. A plain regex-based stripper gets
+// this wrong — it will happily "close" that fake comment at the next real
+// `*/` in the file, eating everything in between.
+function stripJsoncComments(raw: string): string {
+  let result = "";
+  let inString = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      result += ch;
+      if (ch === "\\" && i + 1 < raw.length) {
+        result += raw[i + 1];
+        i += 1;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      result += ch;
+      continue;
+    }
+    if (ch === "/" && raw[i + 1] === "/") {
+      while (i < raw.length && raw[i] !== "\n") i += 1;
+      i -= 1; // let the loop's i++ land back on the newline
+      continue;
+    }
+    if (ch === "/" && raw[i + 1] === "*") {
+      i += 2;
+      while (i < raw.length && !(raw[i] === "*" && raw[i + 1] === "/")) i += 1;
+      i += 1; // land on the closing '/', loop's i++ moves past it
+      continue;
+    }
+    result += ch;
+  }
+  return result;
+}
+
+// tsconfig.json/jsconfig.json commonly contain comments and trailing commas,
+// which JSON.parse rejects. This is a best-effort JSONC-tolerant parse, not a
+// full parser — it does not handle `extends` chains. If parsing still fails,
+// callers treat that the same as "no config present."
+function parseJsonc(raw: string): unknown {
+  const withoutComments = stripJsoncComments(raw);
+  const withoutTrailingCommas = withoutComments.replace(/,(\s*[}\]])/g, "$1");
+  return JSON.parse(withoutTrailingCommas);
+}
+
+// Reads `tsconfig.json` (falling back to `jsconfig.json`) from the repo root
+// and extracts `compilerOptions.paths` as resolvable alias rules, so imports
+// like `@/components/Foo` can be matched to a real file instead of being
+// silently dropped. Resolves quietly to `[]` on any missing/unparseable
+// config, matching the fail-open convention used by `cache.ts`'s `loadCache`
+// and `walker.ts`'s `loadIgnore`. Does not follow `tsconfig.json`'s `extends`
+// field — a monorepo whose path aliases live only in a base config it
+// extends will not have those aliases picked up (a known, documented gap,
+// not a silent one).
+export async function loadPathAliases(root: string): Promise<PathAliasRule[]> {
+  for (const configName of ["tsconfig.json", "jsconfig.json"]) {
+    let raw: string;
+    try {
+      raw = await readFile(path.join(root, configName), "utf8");
+    } catch {
+      continue;
+    }
+
+    try {
+      const parsed = parseJsonc(raw) as {
+        compilerOptions?: { paths?: Record<string, unknown>; baseUrl?: string };
+      };
+      const paths = parsed.compilerOptions?.paths;
+      if (!paths || typeof paths !== "object") return [];
+
+      const baseUrl = parsed.compilerOptions?.baseUrl ?? ".";
+      const baseDir = path.resolve(root, baseUrl);
+      const rules: PathAliasRule[] = [];
+
+      for (const [pattern, targets] of Object.entries(paths)) {
+        if (!Array.isArray(targets)) continue;
+        const starIndex = pattern.indexOf("*");
+        const hasWildcard = starIndex !== -1;
+        const prefix = hasWildcard ? pattern.slice(0, starIndex) : pattern;
+        const suffix = hasWildcard ? pattern.slice(starIndex + 1) : "";
+        const resolvedTargets = targets
+          .filter((t): t is string => typeof t === "string")
+          .map((t) => path.resolve(baseDir, t));
+        if (resolvedTargets.length > 0) {
+          rules.push({ prefix, suffix, hasWildcard, targets: resolvedTargets });
+        }
+      }
+      return rules;
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 function resolveImport(
   fromFile: string,
   importSpecifier: string,
-  fileIdByAbsPath: Map<string, string>
+  fileIdByAbsPath: Map<string, string>,
+  aliases: PathAliasRule[] = []
 ): string | undefined {
-  if (!importSpecifier.startsWith(".")) return undefined;
+  const knownExtensions = [".ts", ".tsx", ".js", ".jsx", ".py"];
+  const extensions = ["", ".ts", ".tsx", ".js", ".jsx", ".py"];
 
-  const baseDir = path.dirname(fromFile);
-  const resolved = path.resolve(baseDir, importSpecifier);
-  const knownExtensions = [".ts", ".tsx", ".js", ".jsx"];
-  const matchedExtension = knownExtensions.find((ext) => resolved.endsWith(ext));
-  const candidateBase = matchedExtension
-    ? resolved.slice(0, -matchedExtension.length)
-    : resolved;
-  const extensions = ["", ".ts", ".tsx", ".js", ".jsx"];
+  const resolveCandidates = (resolvedBase: string): string | undefined => {
+    const matchedExtension = knownExtensions.find((ext) => resolvedBase.endsWith(ext));
+    const candidateBase = matchedExtension
+      ? resolvedBase.slice(0, -matchedExtension.length)
+      : resolvedBase;
+    for (const ext of extensions) {
+      const candidate = candidateBase + ext;
+      if (fileIdByAbsPath.has(candidate)) {
+        return fileIdByAbsPath.get(candidate);
+      }
+    }
+    return undefined;
+  };
 
-  for (const ext of extensions) {
-    const candidate = candidateBase + ext;
-    if (fileIdByAbsPath.has(candidate)) {
-      return fileIdByAbsPath.get(candidate);
+  if (importSpecifier.startsWith(".")) {
+    const baseDir = path.dirname(fromFile);
+    return resolveCandidates(path.resolve(baseDir, importSpecifier));
+  }
+
+  // Non-relative specifier: try tsconfig/jsconfig "paths" aliases (e.g. `@/*`)
+  // before giving up. Without this, every alias-based import — the norm in
+  // most modern Next.js/Vite/monorepo codebases — is invisible to the graph,
+  // which silently undercounts fanIn for exactly the files most likely to be
+  // architecturally central.
+  for (const rule of aliases) {
+    let wildcardMatch: string | undefined;
+    if (rule.hasWildcard) {
+      if (
+        importSpecifier.startsWith(rule.prefix) &&
+        importSpecifier.endsWith(rule.suffix) &&
+        importSpecifier.length >= rule.prefix.length + rule.suffix.length
+      ) {
+        wildcardMatch = importSpecifier.slice(
+          rule.prefix.length,
+          importSpecifier.length - rule.suffix.length
+        );
+      }
+    } else if (importSpecifier === rule.prefix) {
+      wildcardMatch = "";
+    }
+    if (wildcardMatch === undefined) continue;
+
+    for (const target of rule.targets) {
+      const resolvedBase = target.includes("*")
+        ? target.replace("*", wildcardMatch)
+        : target;
+      const found = resolveCandidates(resolvedBase);
+      if (found) return found;
     }
   }
+
   return undefined;
 }
 
-const TEST_SUFFIX_RE = /\.(test|spec)\.(ts|tsx|js|jsx)$/;
+const TEST_SUFFIX_RE = /(\.(test|spec)\.(ts|tsx|js|jsx)$)|((_test|\.test)\.py$)/;
+
+const PY_TEST_PREFIX_RE = /^test_(.+)\.py$/;
 
 function testTargetKey(relPath: string): string {
   const dir = path.dirname(relPath);
-  const base = path.basename(relPath).replace(TEST_SUFFIX_RE, "");
+  const basename = path.basename(relPath);
+  const prefixMatch = PY_TEST_PREFIX_RE.exec(basename);
+  if (prefixMatch) {
+    return path.join(dir, prefixMatch[1]);
+  }
+  const base = basename.replace(TEST_SUFFIX_RE, "");
   return path.join(dir, base);
 }
 
@@ -50,7 +209,8 @@ function sourceKey(relPath: string): string {
 
 export function buildGraph(
   parsedByFile: Map<string, FileEntry>,
-  root: string
+  root: string,
+  aliases: PathAliasRule[] = []
 ): CodeGraph {
   const nodes: GraphNode[] = [];
   const edges: Edge[] = [];
@@ -105,7 +265,7 @@ export function buildGraph(
     const fileId = fileIdByAbsPath.get(absPath)!;
     const resolvedTargets = new Set<string>();
     for (const importSpecifier of entry.parsed.imports) {
-      const targetId = resolveImport(absPath, importSpecifier, fileIdByAbsPath);
+      const targetId = resolveImport(absPath, importSpecifier, fileIdByAbsPath, aliases);
       if (targetId) {
         resolvedTargets.add(targetId);
       }
