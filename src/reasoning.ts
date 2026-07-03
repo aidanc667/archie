@@ -250,14 +250,14 @@ function buildScopeStatement(pack: ContextPack): string {
   const detailedFiles = pack.topRiskFiles.length;
 
   if (pack.mode === "cluster-summary") {
-    return `**Scope of this analysis:** ${detailedFiles} of ${totalFiles} files were analyzed in full detail; the remaining files were assessed only at a coarse, cluster-level (aggregate complexity and risk statistics, no individual findings) because this repository exceeded the size this tool can fully detail in one pass. This report's specific, evidenced findings apply only to the ${detailedFiles} files analyzed in detail — the rest were not individually assessed and may contain risks this report does not surface.`;
+    return `**Scope of this analysis:** Archie analyzed all ${totalFiles} files in this repository and ranked them by risk. The top ${detailedFiles} were examined in full detail; the remaining files were assessed only at a coarse, cluster-level (aggregate complexity and risk statistics, no individual findings) because this repository exceeded the size this tool can fully detail in one pass. This report's specific, evidenced findings apply only to the ${detailedFiles} files analyzed in detail — the rest were not individually assessed and may contain risks this report does not surface.`;
   }
 
   const unassessed = totalFiles - detailedFiles;
   if (unassessed <= 0) {
-    return `**Scope of this analysis:** all ${totalFiles} files in this repository were analyzed in detail.`;
+    return `**Scope of this analysis:** Archie analyzed all ${totalFiles} files in this repository in detail.`;
   }
-  return `**Scope of this analysis:** ${detailedFiles} of ${totalFiles} files were analyzed in detail for this report. The remaining ${unassessed} file${unassessed === 1 ? "" : "s"} were not individually assessed and are not covered by this report's findings.`;
+  return `**Scope of this analysis:** Archie analyzed all ${totalFiles} files in this repository, ranked them by risk, and examined the top ${detailedFiles} in detail for this report. The remaining ${unassessed} file${unassessed === 1 ? "" : "s"} were not individually assessed and are not covered by this report's findings.`;
 }
 
 const MAX_DISPLAYED_RISKS = 5;

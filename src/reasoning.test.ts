@@ -553,7 +553,8 @@ describe("generateReport", () => {
 
     const { report: result } = await generateReport(fakeClient as any, pack);
     expect(result).toContain("**Scope of this analysis:**");
-    expect(result).toContain("3 of 20 files");
+    expect(result).toContain("analyzed all 20 files");
+    expect(result).toContain("examined the top 3 in detail");
   });
 
   it("includes cluster-specific scope wording for a cluster-summary pack", async () => {
@@ -639,7 +640,7 @@ describe("generateReport", () => {
     };
 
     const { report: result } = await generateReport(fakeClient as any, pack);
-    expect(result).toContain("**Scope of this analysis:** all 2 files in this repository were analyzed in detail.");
+    expect(result).toContain("**Scope of this analysis:** Archie analyzed all 2 files in this repository in detail.");
     expect(result).not.toContain("were not individually assessed");
   });
 });
