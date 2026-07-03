@@ -95,7 +95,11 @@ describe("runPipeline with generatePdf", () => {
 
     REQUIRED_HEADINGS.forEach((h) => expect(result.report).toContain(h));
     expect(result.report).toContain("**Severity:** High");
-    expect(result.simplifiedSummary).toBe(SIMPLIFIED_SUMMARY_TEXT);
+    // generateSimplifiedSummary now deterministically splices in the scope
+    // statement already present in `result.report` — SIMPLIFIED_SUMMARY_TEXT
+    // has no "---" separator, so it lands prepended rather than mid-document.
+    expect(result.simplifiedSummary).toContain(SIMPLIFIED_SUMMARY_TEXT);
+    expect(result.simplifiedSummary).toMatch(/^\*Scope: .+analyzed.+\*/);
   });
 
   it("leaves simplifiedSummary undefined when generatePdf is false", async () => {

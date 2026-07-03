@@ -5,6 +5,7 @@ import {
   generateReport,
   generateSimplifiedSummary,
   ABSENCE_CLAIM_RULE,
+  SCENARIO_GROUNDING_RULE,
 } from "./reasoning.js";
 import type { ContextPack } from "./summarizer.js";
 
@@ -302,6 +303,157 @@ describe("generateReport", () => {
         : result.slice(highConfSectionStart, nextRiskOrEnd);
     expect(highConfSection).not.toContain("*Confidence:");
   });
+
+  it("includes a scope statement with partial-coverage wording for a top-n-detail pack with unassessed files", async () => {
+    const remainingText = [
+      "## 1. System Summary\ncontent",
+      "## 3. Production Failure Scenarios\ncontent",
+      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 5. Senior Engineer Verdict\ncontent",
+    ].join("\n\n");
+
+    const fakeClient = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
+          .mockResolvedValueOnce({
+            content: [{ type: "text", text: remainingText }],
+            usage: { input_tokens: 200, output_tokens: 150 },
+          }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 20, totalLoc: 1000 },
+      topRiskFiles: [
+        {
+          path: "src/a.ts",
+          riskScore: 0.9,
+          complexity: 10,
+          fanIn: 5,
+          loc: 100,
+          source: "",
+          hasTests: true,
+          hasErrorHandling: true,
+        },
+        {
+          path: "src/b.ts",
+          riskScore: 0.8,
+          complexity: 8,
+          fanIn: 3,
+          loc: 80,
+          source: "",
+          hasTests: false,
+          hasErrorHandling: false,
+        },
+        {
+          path: "src/c.ts",
+          riskScore: 0.7,
+          complexity: 6,
+          fanIn: 2,
+          loc: 60,
+          source: "",
+          hasTests: true,
+          hasErrorHandling: false,
+        },
+      ],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    const { report: result } = await generateReport(fakeClient as any, pack);
+    expect(result).toContain("**Scope of this analysis:**");
+    expect(result).toContain("3 of 20 files");
+  });
+
+  it("includes cluster-specific scope wording for a cluster-summary pack", async () => {
+    const remainingText = [
+      "## 1. System Summary\ncontent",
+      "## 3. Production Failure Scenarios\ncontent",
+      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 5. Senior Engineer Verdict\ncontent",
+    ].join("\n\n");
+
+    const fakeClient = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
+          .mockResolvedValueOnce({
+            content: [{ type: "text", text: remainingText }],
+            usage: { input_tokens: 200, output_tokens: 150 },
+          }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "cluster-summary",
+      systemSummary: { fileCount: 500, totalLoc: 50000 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [{ fileCount: 500, averageComplexity: 5, maxRiskScore: 0.95 }],
+    };
+
+    const { report: result } = await generateReport(fakeClient as any, pack);
+    expect(result).toContain("**Scope of this analysis:**");
+    expect(result.toLowerCase()).toMatch(/coarse|cluster-level/);
+  });
+
+  it("uses 'all N files' wording when every file was analyzed in detail", async () => {
+    const remainingText = [
+      "## 1. System Summary\ncontent",
+      "## 3. Production Failure Scenarios\ncontent",
+      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 5. Senior Engineer Verdict\ncontent",
+    ].join("\n\n");
+
+    const fakeClient = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
+          .mockResolvedValueOnce({
+            content: [{ type: "text", text: remainingText }],
+            usage: { input_tokens: 200, output_tokens: 150 },
+          }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 2, totalLoc: 100 },
+      topRiskFiles: [
+        {
+          path: "src/a.ts",
+          riskScore: 0.9,
+          complexity: 10,
+          fanIn: 5,
+          loc: 50,
+          source: "",
+          hasTests: true,
+          hasErrorHandling: true,
+        },
+        {
+          path: "src/b.ts",
+          riskScore: 0.8,
+          complexity: 8,
+          fanIn: 3,
+          loc: 50,
+          source: "",
+          hasTests: false,
+          hasErrorHandling: false,
+        },
+      ],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    const { report: result } = await generateReport(fakeClient as any, pack);
+    expect(result).toContain("**Scope of this analysis:** all 2 files in this repository were analyzed in detail.");
+    expect(result).not.toContain("were not individually assessed");
+  });
 });
 
 describe("ABSENCE_CLAIM_RULE", () => {
@@ -312,6 +464,13 @@ describe("ABSENCE_CLAIM_RULE", () => {
 
   it("explicitly forbids claiming a file lacks error handling unless hasErrorHandling is present and false", () => {
     expect(ABSENCE_CLAIM_RULE).toMatch(/hasErrorHandling/);
+  });
+});
+
+describe("SCENARIO_GROUNDING_RULE", () => {
+  it("forbids asserting a specific attacker-controlled call chain unless graphSnapshot or source shows it", () => {
+    expect(SCENARIO_GROUNDING_RULE).toMatch(/graphSnapshot/);
+    expect(SCENARIO_GROUNDING_RULE.toLowerCase()).toMatch(/conditionally/);
   });
 });
 
@@ -332,6 +491,44 @@ describe("generateSimplifiedSummary", () => {
     expect(summary).toBe(simplifiedText);
     expect(usage).toEqual({ inputTokens: 100, outputTokens: 50 });
     expect(fakeClient.messages.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("deterministically splices the technical report's scope statement into the simplified summary, near the top", async () => {
+    const simplifiedText =
+      "# Some System\n\n*Architecture Report · Generated by ARCHIE*\n\n---\n\n## What This System Does\n\nDoes things.\n\n---\n\n## Bottom Line\n\nFine.";
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [{ type: "text", text: simplifiedText }],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+      },
+    };
+
+    const technicalReport =
+      "## 1. System Summary\n\nSome prose.\n\n**Scope of this analysis:** 10 of 32 files were analyzed in detail for this report. The remaining 22 files were not individually assessed.\n\n## 2. Top 5 Architectural Risks\n...";
+
+    const { summary } = await generateSimplifiedSummary(fakeClient as any, technicalReport);
+
+    expect(summary).toContain("10 of 32 files were analyzed in detail");
+    // Must land before "What This System Does", not buried at the end.
+    expect(summary.indexOf("10 of 32 files")).toBeLessThan(summary.indexOf("What This System Does"));
+  });
+
+  it("leaves the simplified summary unchanged when the technical report has no scope statement (unexpected shape, fail open)", async () => {
+    const simplifiedText =
+      "# System\n\nNo separator anywhere in here at all, and this sentence pads it past the minimum length requirement.";
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [{ type: "text", text: simplifiedText }],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+      },
+    };
+
+    const { summary } = await generateSimplifiedSummary(fakeClient as any, "no scope line in this input at all");
+    expect(summary).toBe(simplifiedText);
   });
 
   it("throws when the response is suspiciously short", async () => {

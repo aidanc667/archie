@@ -35,6 +35,15 @@ export const ABSENCE_CLAIM_RULE = `- Never claim a file or system "lacks," "is m
     of asserting absence. A claim of absence without a verifiable basis is a
     fabrication, not a finding.`;
 
+export const SCENARIO_GROUNDING_RULE = `Grounding rule for this section: a scenario may describe a real code
+weakness (e.g. an unvalidated input, a missing guard) as the trigger even without seeing every caller. But
+do NOT assert that a specific untrusted or attacker-controlled value actually reaches that weakness through
+a named call chain (e.g. "an attacker's POST payload flows through function X into function Y") unless the
+Context Pack's \`graphSnapshot\` or included source actually shows that call path. If the path is plausible
+but not shown, phrase it conditionally — "if X's caller ever passes untrusted input here" — rather than as a
+demonstrated attack chain. A vulnerability pattern that's real but whose reachability is unverified is still
+worth reporting; overstating how it's triggered is not.`;
+
 const SYSTEM_PROMPT = `You are a Staff Engineer writing a formal architecture review for a software engineering team.
 You will be given a Context Pack: a system summary, top-risk files with full source code and metrics
 (complexity, fan-in, LOC, dependency depth, hasTests), a dependency graph snapshot, and optionally
@@ -95,6 +104,8 @@ Write exactly 3 concrete failure scenarios — realistic sequences of events tha
 **Chain of failure:** [Step-by-step: what breaks, what cascades, what the user or system experiences.]
 **Business impact:** [Data loss / downtime / security breach / incorrect results / degraded performance — and at what scale or frequency this is likely.]
 **Likelihood:** [High / Medium / Low] — [one sentence justification]
+
+${SCENARIO_GROUNDING_RULE}
 
 ---
 
@@ -192,6 +203,21 @@ const CONFIDENCE_CAVEATS: Record<"medium" | "low", string> = {
     "*Confidence: based on a partial view of this file (signature summary, not full source) — treat as directionally correct pending closer review.*",
 };
 
+function buildScopeStatement(pack: ContextPack): string {
+  const totalFiles = pack.systemSummary.fileCount;
+  const detailedFiles = pack.topRiskFiles.length;
+
+  if (pack.mode === "cluster-summary") {
+    return `**Scope of this analysis:** ${detailedFiles} of ${totalFiles} files were analyzed in full detail; the remaining files were assessed only at a coarse, cluster-level (aggregate complexity and risk statistics, no individual findings) because this repository exceeded the size this tool can fully detail in one pass. This report's specific, evidenced findings apply only to the ${detailedFiles} files analyzed in detail — the rest were not individually assessed and may contain risks this report does not surface.`;
+  }
+
+  const unassessed = totalFiles - detailedFiles;
+  if (unassessed <= 0) {
+    return `**Scope of this analysis:** all ${totalFiles} files in this repository were analyzed in detail.`;
+  }
+  return `**Scope of this analysis:** ${detailedFiles} of ${totalFiles} files were analyzed in detail for this report. The remaining ${unassessed} file${unassessed === 1 ? "" : "s"} were not individually assessed and are not covered by this report's findings.`;
+}
+
 function formatRisksSection(risks: RiskFinding[]): string {
   const sortedRisks = [...risks].sort(
     (a, b) => SEVERITY_PRIORITY[a.severity] - SEVERITY_PRIORITY[b.severity]
@@ -245,6 +271,7 @@ export async function generateReport(
   const risks = (toolUseBlock.input as { risks: RiskFinding[] }).risks;
 
   const risksSection = formatRisksSection(risks);
+  const scopeStatement = buildScopeStatement(pack);
 
   // Pass 2: remaining sections with structured risks as context
   const remainingSectionsPrompt = `You are writing an architecture report. The "Top 5 Architectural Risks" section has already been generated (shown below). Write only sections 1, 3, 4, and 5 — do NOT include section 2.
@@ -276,10 +303,10 @@ Write exactly these four sections with these exact headings (no section 2):
 
   let finalReport: string;
   if (section1Match && section345Match) {
-    finalReport = `${section1Match[1].trimEnd()}\n\n${risksSection}\n\n${section345Match[1]}`;
+    finalReport = `${section1Match[1].trimEnd()}\n\n${scopeStatement}\n\n${risksSection}\n\n${section345Match[1]}`;
   } else {
-    // Fallback: prepend risks section to the response
-    finalReport = `${remainingText.split("## 3.")[0].trimEnd()}\n\n${risksSection}\n\n## 3.${remainingText.split("## 3.").slice(1).join("## 3.")}`;
+    // Fallback: prepend scope statement and risks section to the response
+    finalReport = `${remainingText.split("## 3.")[0].trimEnd()}\n\n${scopeStatement}\n\n${risksSection}\n\n## 3.${remainingText.split("## 3.").slice(1).join("## 3.")}`;
   }
 
   if (!validateReportSections(finalReport)) {
@@ -350,6 +377,30 @@ Rules:
 - Readable in under 2 minutes.
 - Every section heading must appear exactly as shown above.`;
 
+const SCOPE_STATEMENT_RE = /\*\*Scope of this analysis:\*\*\s*([^\n]+)/;
+
+// Pulls the deterministically-generated scope line out of the technical
+// report (already spliced in by `generateReport`/`buildScopeStatement`) and
+// re-inserts it near the top of the simplified summary. The simplified
+// summary is a non-technical, LLM-written translation of the technical
+// report; nothing guarantees the model remembers to restate a limitation
+// buried in its input, and the executive-facing PDF is exactly the surface
+// where a reader is least likely to think to ask "did this cover everything?"
+function spliceScopeNote(summary: string, technicalReport: string): string {
+  const match = technicalReport.match(SCOPE_STATEMENT_RE);
+  if (!match) return summary;
+
+  const scopeNote = `*Scope: ${match[1].trim()}*`;
+  const firstSeparator = summary.indexOf("\n---\n");
+  if (firstSeparator === -1) {
+    // No "---" separator found (unexpected shape) — prepend rather than lose the note.
+    return `${scopeNote}\n\n${summary}`;
+  }
+
+  const insertAt = firstSeparator + "\n---\n".length;
+  return `${summary.slice(0, insertAt)}\n${scopeNote}\n\n---\n${summary.slice(insertAt)}`;
+}
+
 export async function generateSimplifiedSummary(
   client: Anthropic,
   technicalReport: string
@@ -369,10 +420,12 @@ export async function generateSimplifiedSummary(
     );
   }
 
+  const summary = spliceScopeNote(text, technicalReport);
+
   const usage: TokenUsage = {
     inputTokens: response.usage.input_tokens,
     outputTokens: response.usage.output_tokens,
   };
 
-  return { summary: text, usage };
+  return { summary, usage };
 }
