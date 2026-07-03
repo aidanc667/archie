@@ -191,6 +191,48 @@ function extractTextBlock(response: Anthropic.Messages.Message): string {
   return textBlock && "text" in textBlock ? textBlock.text : "";
 }
 
+const REQUIRED_RISK_FIELDS = [
+  "title",
+  "file",
+  "severity",
+  "confidence",
+  "why_it_matters",
+  "root_cause",
+  "evidence",
+] as const;
+
+// The report_risks tool call is trusted with zero validation downstream
+// (formatRisksSection reads risk.title/severity/etc. directly). If the
+// response was truncated (e.g. hit max_tokens mid-JSON on a large, complex
+// repo) or otherwise malformed, `risks` can come back as something other
+// than a clean array of well-formed objects -- and every field access on a
+// malformed entry silently evaluates to `undefined` rather than throwing,
+// producing a report full of "Risk N: undefined — `undefined`" instead of a
+// clear failure. Fail loudly instead.
+function validateRisks(risks: unknown): RiskFinding[] {
+  if (!Array.isArray(risks)) {
+    throw new Error(
+      `report_risks tool call returned a malformed "risks" field (expected an array, got ${typeof risks}). This usually means the response was truncated by the token limit — try again, or reduce --topN to shrink the context pack.`
+    );
+  }
+  risks.forEach((risk, i) => {
+    if (typeof risk !== "object" || risk === null) {
+      throw new Error(
+        `report_risks tool call returned a malformed risk at index ${i} (expected an object, got ${typeof risk}). This usually means the response was truncated by the token limit.`
+      );
+    }
+    for (const field of REQUIRED_RISK_FIELDS) {
+      const value = (risk as Record<string, unknown>)[field];
+      if (typeof value !== "string" || value.length === 0) {
+        throw new Error(
+          `report_risks tool call returned a malformed risk at index ${i}: "${field}" is missing or empty. This usually means the response was truncated by the token limit.`
+        );
+      }
+    }
+  });
+  return risks as RiskFinding[];
+}
+
 const SEVERITY_PRIORITY: Record<RiskFinding["severity"], number> = {
   Critical: 0,
   High: 1,
@@ -218,10 +260,12 @@ function buildScopeStatement(pack: ContextPack): string {
   return `**Scope of this analysis:** ${detailedFiles} of ${totalFiles} files were analyzed in detail for this report. The remaining ${unassessed} file${unassessed === 1 ? "" : "s"} were not individually assessed and are not covered by this report's findings.`;
 }
 
+const MAX_DISPLAYED_RISKS = 5;
+
 function formatRisksSection(risks: RiskFinding[]): string {
-  const sortedRisks = [...risks].sort(
-    (a, b) => SEVERITY_PRIORITY[a.severity] - SEVERITY_PRIORITY[b.severity]
-  );
+  const sortedRisks = [...risks]
+    .sort((a, b) => SEVERITY_PRIORITY[a.severity] - SEVERITY_PRIORITY[b.severity])
+    .slice(0, MAX_DISPLAYED_RISKS);
 
   const lines = ["## 2. Top 5 Architectural Risks", ""];
   sortedRisks.forEach((risk, i) => {
@@ -243,32 +287,85 @@ export interface TokenUsage {
   outputTokens: number;
 }
 
+const RETRYABLE_ERROR_RE = /truncated|malformed/i;
+const MAX_RISK_EXTRACTION_ATTEMPTS = 3;
+
+// Pass 1 (structured risk extraction) is the step observed to intermittently
+// truncate on large/complex repos -- confirmed live: the same repo produced
+// a clean 5-risk response on some runs and a truncated, malformed one on
+// others, with no code-level difference between attempts. This is API-level
+// non-determinism, not a bug to "fix" away entirely, so it's handled with a
+// bounded retry rather than a one-shot hard failure. Only retries the
+// specific truncation/malformation error class raised by validateRisks/the
+// stop_reason check above -- any other error (missing tool call, bad API
+// key, etc.) is not transient and is rethrown immediately.
+async function extractRisks(
+  client: Anthropic,
+  pack: ContextPack
+): Promise<{ risks: RiskFinding[]; usage: TokenUsage }> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_RISK_EXTRACTION_ATTEMPTS; attempt++) {
+    try {
+      const risksResponse = await client.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        system: `${SYSTEM_PROMPT}\n\n${CONFIDENCE_RULES}`,
+        messages: [
+          {
+            role: "user",
+            content: `Identify at most ${MAX_DISPLAYED_RISKS} of the top architectural risks in this codebase — do not enumerate more than ${MAX_DISPLAYED_RISKS} even if you find more candidates, and keep each field concise (root_cause and evidence: 1-3 sentences each) so the response fits comfortably within the token budget. Use the report_risks tool.\n\n${JSON.stringify(pack, null, 2)}`,
+          },
+        ],
+        tools: [REPORT_RISKS_TOOL],
+        tool_choice: { type: "tool", name: "report_risks" },
+      });
+
+      if (risksResponse.stop_reason === "max_tokens") {
+        throw new Error(
+          "Claude's risk-extraction response was truncated (hit the max_tokens limit) before completing. This can happen on very large or complex repos."
+        );
+      }
+
+      const toolUseBlock = risksResponse.content.find(
+        (block) => block.type === "tool_use" && block.name === "report_risks"
+      );
+      if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
+        throw new Error("Claude did not call report_risks tool as expected.");
+      }
+      const risks = validateRisks((toolUseBlock.input as { risks: unknown }).risks);
+
+      return {
+        risks,
+        usage: {
+          inputTokens: risksResponse.usage.input_tokens,
+          outputTokens: risksResponse.usage.output_tokens,
+        },
+      };
+    } catch (err) {
+      lastError = err;
+      const isRetryable = err instanceof Error && RETRYABLE_ERROR_RE.test(err.message);
+      if (!isRetryable || attempt === MAX_RISK_EXTRACTION_ATTEMPTS) {
+        if (isRetryable) {
+          throw new Error(
+            `${(err as Error).message} Retried ${MAX_RISK_EXTRACTION_ATTEMPTS} times with no success — try reducing --topN to shrink the context pack.`
+          );
+        }
+        throw err;
+      }
+    }
+  }
+
+  // Unreachable — the loop above always returns or throws — but keeps
+  // TypeScript satisfied that every path returns a value.
+  throw lastError;
+}
+
 export async function generateReport(
   client: Anthropic,
   pack: ContextPack
 ): Promise<{ report: string; usage: TokenUsage }> {
-  // Pass 1: structured risks via tool use
-  const risksResponse = await client.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 4096,
-    system: `${SYSTEM_PROMPT}\n\n${CONFIDENCE_RULES}`,
-    messages: [
-      {
-        role: "user",
-        content: `Identify the top architectural risks in this codebase. Use the report_risks tool.\n\n${JSON.stringify(pack, null, 2)}`,
-      },
-    ],
-    tools: [REPORT_RISKS_TOOL],
-    tool_choice: { type: "tool", name: "report_risks" },
-  });
-
-  const toolUseBlock = risksResponse.content.find(
-    (block) => block.type === "tool_use" && block.name === "report_risks"
-  );
-  if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
-    throw new Error("Claude did not call report_risks tool as expected.");
-  }
-  const risks = (toolUseBlock.input as { risks: RiskFinding[] }).risks;
+  const { risks, usage: risksUsage } = await extractRisks(client, pack);
 
   const risksSection = formatRisksSection(risks);
   const scopeStatement = buildScopeStatement(pack);
@@ -316,8 +413,8 @@ Write exactly these four sections with these exact headings (no section 2):
   }
 
   const usage: TokenUsage = {
-    inputTokens: risksResponse.usage.input_tokens + remainingResponse.usage.input_tokens,
-    outputTokens: risksResponse.usage.output_tokens + remainingResponse.usage.output_tokens,
+    inputTokens: risksUsage.inputTokens + remainingResponse.usage.input_tokens,
+    outputTokens: risksUsage.outputTokens + remainingResponse.usage.output_tokens,
   };
 
   return { report: finalReport, usage };

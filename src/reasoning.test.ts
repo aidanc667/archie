@@ -128,6 +128,194 @@ describe("generateReport", () => {
     );
   });
 
+  it("throws a clear error when pass 1's response was truncated (stop_reason: max_tokens)", async () => {
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          ...FAKE_RISKS_TOOL_RESPONSE,
+          stop_reason: "max_tokens",
+        }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(/truncated/i);
+  });
+
+  it("throws a clear error instead of silently producing undefined-field risks when the tool call's risks field is not an array", async () => {
+    // Regression test: a malformed (e.g. truncated) tool response can return
+    // `risks` as something other than a well-formed array. Previously this
+    // silently produced a report with thousands of "Risk N: undefined —
+    // `undefined`" entries instead of failing loudly.
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [
+            {
+              type: "tool_use",
+              id: "tu_1",
+              name: "report_risks",
+              input: { risks: "not an array, e.g. truncated raw JSON text" },
+            },
+          ],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(
+      /malformed.*risks.*field/i
+    );
+  });
+
+  it("throws a clear error when a risk object is missing a required field", async () => {
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [
+            {
+              type: "tool_use",
+              id: "tu_1",
+              name: "report_risks",
+              input: { risks: [{ title: "Missing fields", file: "src/x.ts" }] },
+            },
+          ],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(/malformed risk at index 0/i);
+  });
+
+  it("retries pass 1 after a truncated response and succeeds on a later attempt", async () => {
+    const remainingText = [
+      "## 1. System Summary\ncontent",
+      "## 3. Production Failure Scenarios\ncontent",
+      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 5. Senior Engineer Verdict\ncontent",
+    ].join("\n\n");
+
+    const truncatedResponse = { ...FAKE_RISKS_TOOL_RESPONSE, stop_reason: "max_tokens" };
+
+    const fakeClient = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce(truncatedResponse) // attempt 1: truncated
+          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE) // attempt 2: succeeds
+          .mockResolvedValueOnce({
+            content: [{ type: "text", text: remainingText }],
+            usage: { input_tokens: 200, output_tokens: 150 },
+          }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    const { report } = await generateReport(fakeClient as any, pack);
+    expect(report).toContain("**Severity:** High");
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(3); // 2 pass-1 attempts + 1 pass-2 call
+  });
+
+  it("does not retry a non-retryable error (e.g. no tool_use block at all)", async () => {
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [{ type: "text", text: "incomplete response" }],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(/report_risks tool/);
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(1); // failed fast, no retries
+  });
+
+  it("caps the rendered risks section at 5, even if the model returns more", async () => {
+    const manyRisks = Array.from({ length: 8 }, (_, i) => ({
+      title: `Risk ${i}`,
+      file: `src/file${i}.ts`,
+      severity: "Medium" as const,
+      confidence: "high" as const,
+      why_it_matters: "matters",
+      root_cause: "cause",
+      evidence: "evidence",
+    }));
+
+    const remainingText = [
+      "## 1. System Summary\ncontent",
+      "## 3. Production Failure Scenarios\ncontent",
+      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 5. Senior Engineer Verdict\ncontent",
+    ].join("\n\n");
+
+    const fakeClient = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce({
+            content: [
+              { type: "tool_use", id: "tu_1", name: "report_risks", input: { risks: manyRisks } },
+            ],
+            usage: { input_tokens: 100, output_tokens: 50 },
+          })
+          .mockResolvedValueOnce({
+            content: [{ type: "text", text: remainingText }],
+            usage: { input_tokens: 200, output_tokens: 150 },
+          }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    const { report } = await generateReport(fakeClient as any, pack);
+    expect(report.match(/^### Risk \d+:/gm)).toHaveLength(5);
+  });
+
   it("throws when the assembled report is missing required sections", async () => {
     const fakeClient = {
       messages: {
