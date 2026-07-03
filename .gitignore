@@ -4,3 +4,6 @@ dist/
 archie-report.md
 .archie-cache/
 .DS_Store
+.env
+.env.*
+.claude/settings.local.json
