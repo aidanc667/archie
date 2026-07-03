@@ -3,6 +3,10 @@
   "description": "AI Staff Engineer architecture analysis for a local repo",
   "version": "0.1.0",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aidanc667/archie"
+  },
   "keywords": [
     "cli",
     "architecture",
