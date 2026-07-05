@@ -189,8 +189,21 @@ const TEST_SUFFIX_RE = /(\.(test|spec)\.(ts|tsx|js|jsx)$)|((_test|\.test)\.py$)/
 
 const PY_TEST_PREFIX_RE = /^test_(.+)\.py$/;
 
+// Jest/RTL convention: tests live one directory below their source file, in
+// a sibling `__tests__/` directory (e.g. `agents/foo.ts` tested by
+// `agents/__tests__/foo.test.ts`), rather than next to it. Without stripping
+// this segment, testTargetKey and sourceKey never produce the same key for
+// this layout and `hasTests` is silently wrong for every file that uses it.
+function stripTestDirSegment(dir: string): string {
+  const segments = dir.split(path.sep);
+  if (segments[segments.length - 1] === "__tests__") {
+    return segments.slice(0, -1).join(path.sep) || ".";
+  }
+  return dir;
+}
+
 function testTargetKey(relPath: string): string {
-  const dir = path.dirname(relPath);
+  const dir = stripTestDirSegment(path.dirname(relPath));
   const basename = path.basename(relPath);
   const prefixMatch = PY_TEST_PREFIX_RE.exec(basename);
   if (prefixMatch) {

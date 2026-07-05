@@ -144,6 +144,32 @@ describe("buildGraph", () => {
     expect(orphanHasTest).toBe(false);
   });
 
+  // Regression coverage for a false-negative found reviewing a real external
+  // repo: portfolioRules.ts was tested (agents/__tests__/portfolioRules.test.ts)
+  // but got reported as having no tests, because TESTED_BY only matched a test
+  // file in the exact same directory as its source file. The Jest/RTL
+  // convention of a sibling __tests__/ directory one level down was silently
+  // never matched, making the grounded "hasTests: false" claim confidently wrong.
+  it("emits a TESTED_BY edge when the test file lives in a sibling __tests__/ directory", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/src/lib/agents/portfolioRules.ts",
+        { loc: 20, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+      [
+        "/repo/src/lib/agents/__tests__/portfolioRules.test.ts",
+        { loc: 15, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo");
+
+    const testedByEdges = graph.edges.filter((e) => e.type === "TESTED_BY");
+    expect(testedByEdges).toHaveLength(1);
+    expect(testedByEdges[0].from).toBe("file:src/lib/agents/portfolioRules.ts");
+    expect(testedByEdges[0].to).toBe("file:src/lib/agents/__tests__/portfolioRules.test.ts");
+  });
+
   it("resolves a tsconfig-style path alias (e.g. @/*) when alias rules are provided", () => {
     const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
       [
