@@ -38,6 +38,14 @@ export interface PipelineResult {
   simplifiedSummary?: string;
   history: { current: HistoryEntry; previous: HistoryEntry | null };
   usage: { inputTokens: number; outputTokens: number; estimatedCostUsd: number };
+  // Previously the top-N coverage tradeoff (only the riskiest files get
+  // individual review; the rest only ever contribute to graph structure)
+  // was disclosed nowhere except a sentence buried inside the generated
+  // report itself -- a user could easily miss it and conclude the tool
+  // "isn't analyzing the codebase fully" without realizing this is a
+  // disclosed, deliberate token-budget tradeoff. Surfacing it here lets the
+  // CLI print it unconditionally, not just to someone who reads the report.
+  scope: { totalFiles: number; detailedFiles: number; mode: "top-n-detail" | "cluster-summary" };
 }
 
 export async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
@@ -185,6 +193,11 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       inputTokens: totalInputTokens,
       outputTokens: totalOutputTokens,
       estimatedCostUsd,
+    },
+    scope: {
+      totalFiles: pack.systemSummary.fileCount,
+      detailedFiles: pack.topRiskFiles.length,
+      mode: pack.mode,
     },
   };
 }

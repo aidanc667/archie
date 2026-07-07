@@ -114,4 +114,37 @@ describe("runPipeline with generatePdf", () => {
     REQUIRED_HEADINGS.forEach((h) => expect(result.report).toContain(h));
     expect(result.simplifiedSummary).toBeUndefined();
   });
+
+  // Regression coverage: the top-N coverage tradeoff was previously
+  // disclosed nowhere except a sentence buried inside the generated report
+  // itself, which a user could easily miss entirely -- leading to exactly
+  // the "this isn't analyzing my codebase fully" impression that's actually
+  // a disclosed, deliberate token-budget tradeoff. result.scope surfaces the
+  // same numbers as structured data so the CLI can print them unconditionally.
+  it("populates result.scope with the actual file counts and mode used", async () => {
+    const repoPath = path.resolve("fixtures/parser-basic");
+    const result = await runPipeline({
+      repoPath,
+      topN: 5,
+      maxTokens: 50000,
+      generatePdf: false,
+    });
+
+    expect(result.scope.mode).toBe("top-n-detail");
+    expect(result.scope.totalFiles).toBeGreaterThan(0);
+    expect(result.scope.detailedFiles).toBeLessThanOrEqual(result.scope.totalFiles);
+  });
+
+  it("reports cluster-summary mode in result.scope when the repo exceeds the token budget", async () => {
+    const repoPath = path.resolve("fixtures/parser-basic");
+    const result = await runPipeline({
+      repoPath,
+      topN: 5,
+      maxTokens: 1,
+      generatePdf: false,
+    });
+
+    expect(result.scope.mode).toBe("cluster-summary");
+    expect(result.scope.detailedFiles).toBe(0);
+  });
 });

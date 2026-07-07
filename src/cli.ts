@@ -81,6 +81,23 @@ program
           });
           const { report, graph } = result;
 
+          // Printed unconditionally (both --json and normal mode), not
+          // gated behind --verbose: previously the only place this coverage
+          // tradeoff was disclosed was a sentence buried inside the
+          // generated report itself, which a user could easily never read.
+          const { totalFiles, detailedFiles, mode: scopeMode } = result.scope;
+          if (scopeMode === "cluster-summary") {
+            console.error(
+              `[scope] ${totalFiles} files found; top ${detailedFiles} reviewed in full detail, the rest assessed only at a coarse aggregate level (repo exceeded this run's token budget)`
+            );
+          } else if (detailedFiles < totalFiles) {
+            console.error(
+              `[scope] ${totalFiles} files found; top ${detailedFiles} reviewed in detail, remaining ${totalFiles - detailedFiles} not individually assessed (raise --topN to review more)`
+            );
+          } else {
+            console.error(`[scope] ${totalFiles} files found, all reviewed in detail`);
+          }
+
           if (!opts.json) {
             const { current, previous } = result.history;
             if (previous === null) {
