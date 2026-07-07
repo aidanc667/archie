@@ -2,6 +2,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ContextPack } from "./summarizer.js";
 
+// Single source of truth for the model used across all three Claude calls in
+// this file -- previously duplicated as a literal string in each call site,
+// which meant a version bump required three separate, easy-to-miss edits.
+const CLAUDE_MODEL = "claude-sonnet-4-6";
+
 export const REQUIRED_HEADINGS = [
   "1. System Summary",
   "2. Top 5 Architectural Risks",
@@ -308,7 +313,7 @@ async function extractRisks(
   for (let attempt = 1; attempt <= MAX_RISK_EXTRACTION_ATTEMPTS; attempt++) {
     try {
       const risksResponse = await client.messages.create({
-        model: "claude-sonnet-4-6",
+        model: CLAUDE_MODEL,
         max_tokens: 8192,
         temperature: 0,
         system: `${SYSTEM_PROMPT}\n\n${CONFIDENCE_RULES}`,
@@ -387,7 +392,7 @@ Write exactly these four sections with these exact headings (no section 2):
 ## 5. Senior Engineer Verdict`;
 
   const remainingResponse = await client.messages.create({
-    model: "claude-sonnet-4-6",
+    model: CLAUDE_MODEL,
     max_tokens: 6144,
     temperature: 0,
     system: SYSTEM_PROMPT,
@@ -396,16 +401,28 @@ Write exactly these four sections with these exact headings (no section 2):
 
   const remainingText = extractTextBlock(remainingResponse);
 
-  // Assemble final report: inject risks section between section 1 and section 3
-  const section1Match = remainingText.match(/(## 1\. System Summary[\s\S]*?)(?=## 3\.)/);
-  const section345Match = remainingText.match(/(## 3\.[\s\S]*)/);
+  // Assemble final report: inject risks section between section 1 and section 3.
+  // Found via Archie's own self-analysis: the previous approach required an
+  // exact literal "## 3." match and fell back to splitting on that same
+  // literal string if the model varied heading formatting even slightly
+  // (extra space, different capitalisation) -- and that fallback split could
+  // duplicate or drop content if "## 3." happened to appear more than once
+  // (e.g. inside a quoted code example). Matching the heading as a
+  // case-insensitive, whitespace-tolerant *line* anchored to the start of a
+  // line avoids both problems: it tolerates formatting drift and can't
+  // accidentally match "## 3." appearing mid-sentence.
+  const heading3Match = remainingText.match(/^##\s*3\.[^\n]*$/im);
 
   let finalReport: string;
-  if (section1Match && section345Match) {
-    finalReport = `${section1Match[1].trimEnd()}\n\n${scopeStatement}\n\n${risksSection}\n\n${section345Match[1]}`;
+  if (heading3Match && heading3Match.index !== undefined) {
+    const section1Text = remainingText.slice(0, heading3Match.index).trimEnd();
+    const section345Text = remainingText.slice(heading3Match.index);
+    finalReport = `${section1Text}\n\n${scopeStatement}\n\n${risksSection}\n\n${section345Text}`;
   } else {
-    // Fallback: prepend scope statement and risks section to the response
-    finalReport = `${remainingText.split("## 3.")[0].trimEnd()}\n\n${scopeStatement}\n\n${risksSection}\n\n## 3.${remainingText.split("## 3.").slice(1).join("## 3.")}`;
+    // Heading 3 doesn't appear at all -- prepend scope statement and risks
+    // section rather than lose the response outright. validateReportSections
+    // below still catches a report that's missing required sections.
+    finalReport = `${remainingText.trimEnd()}\n\n${scopeStatement}\n\n${risksSection}`;
   }
 
   if (!validateReportSections(finalReport)) {
@@ -511,13 +528,21 @@ function spliceScopeNote(summary: string, technicalReport: string): string {
   return `${summary.slice(0, insertAt)}\n${scopeNote}\n\n---\n${summary.slice(insertAt)}`;
 }
 
+// Rough estimate (~4 characters per token) of how many output tokens
+// translating this report will take -- the simplified summary must cover
+// every risk, scenario, and refactor step in the input, so its length scales
+// with the technical report rather than staying roughly constant.
+function estimateSummaryMaxTokens(technicalReport: string): number {
+  return Math.min(8192, Math.max(4096, Math.ceil(technicalReport.length / 4)));
+}
+
 export async function generateSimplifiedSummary(
   client: Anthropic,
   technicalReport: string
 ): Promise<{ summary: string; usage: TokenUsage }> {
   const response = await client.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 4096,
+    model: CLAUDE_MODEL,
+    max_tokens: estimateSummaryMaxTokens(technicalReport),
     temperature: 0,
     system: SIMPLIFIED_SUMMARY_SYSTEM_PROMPT,
     messages: [{ role: "user", content: technicalReport }],

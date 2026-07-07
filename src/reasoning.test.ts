@@ -148,6 +148,84 @@ describe("generateReport", () => {
     expect(calls[1][0]).toMatchObject({ temperature: 0 });
   });
 
+  // Regression coverage found via Archie's own self-analysis: section
+  // assembly previously required an exact literal "## 3." match and fell
+  // back to splitting on that same literal string otherwise -- which broke
+  // on minor heading formatting variation and could duplicate content if
+  // "## 3." appeared more than once. This pins tolerance for exactly that
+  // kind of variation (extra whitespace, different capitalisation).
+  it("assembles the report correctly even when heading 3 has different casing and extra whitespace", async () => {
+    const remainingText = [
+      "## 1. System Summary\ncontent",
+      "##  3. PRODUCTION FAILURE SCENARIOS\ncontent",
+      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 5. Senior Engineer Verdict\ncontent",
+    ].join("\n\n");
+
+    const fakeClient = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
+          .mockResolvedValueOnce({
+            content: [{ type: "text", text: remainingText }],
+            usage: { input_tokens: 200, output_tokens: 150 },
+          }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    const { report } = await generateReport(fakeClient as any, pack);
+    expect(report).toContain("1. System Summary");
+    expect(report).toContain("2. Top 5 Architectural Risks");
+    expect(report).toContain("PRODUCTION FAILURE SCENARIOS");
+    expect(report).toContain("4. Refactor Plan (step-by-step)");
+    expect(report).toContain("5. Senior Engineer Verdict");
+  });
+
+  it("does not duplicate content when a heading-3-like string appears earlier in section 1 (e.g. inside a quoted example)", async () => {
+    const remainingText = [
+      "## 1. System Summary\nThis codebase used to split reports on the literal string \"## 3.\" which was fragile.",
+      "## 3. Production Failure Scenarios\nreal content",
+      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 5. Senior Engineer Verdict\ncontent",
+    ].join("\n\n");
+
+    const fakeClient = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
+          .mockResolvedValueOnce({
+            content: [{ type: "text", text: remainingText }],
+            usage: { input_tokens: 200, output_tokens: 150 },
+          }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    const { report } = await generateReport(fakeClient as any, pack);
+    // The quoted mention in section 1 should appear exactly once, not
+    // duplicated by an over-eager literal-string split.
+    const occurrences = report.split('"## 3."').length - 1;
+    expect(occurrences).toBe(1);
+    expect(report).toContain("real content");
+  });
+
   it("throws when pass 1 does not return a tool_use block", async () => {
     const fakeClient = {
       messages: {
@@ -740,6 +818,34 @@ describe("generateSimplifiedSummary", () => {
     await generateSimplifiedSummary(fakeClient as any, "## 1. System Summary\nDetailed technical report content here.");
 
     expect(fakeClient.messages.create.mock.calls[0][0]).toMatchObject({ temperature: 0 });
+  });
+
+  // Regression coverage found via Archie's own self-analysis: max_tokens was
+  // a fixed 4096 while the simplified summary must translate every risk,
+  // scenario, and refactor step in the input -- so output size scales with
+  // the technical report instead of staying roughly constant, making
+  // truncation more likely as reports grow. This pins that the budget now
+  // scales with input size, within a sane floor and ceiling.
+  it("scales max_tokens with the size of the technical report, within a floor and ceiling", async () => {
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [{
+            type: "text",
+            text: "# What This System Does\n\nThis tool checks code quality.\n\n# Bottom Line\n\nWorks fine, some cleanup needed.",
+          }],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+      },
+    };
+
+    const smallReport = "## 1. System Summary\nshort report";
+    await generateSimplifiedSummary(fakeClient as any, smallReport);
+    expect(fakeClient.messages.create.mock.calls[0][0]).toMatchObject({ max_tokens: 4096 });
+
+    const hugeReport = "## 1. System Summary\n" + "x".repeat(40000);
+    await generateSimplifiedSummary(fakeClient as any, hugeReport);
+    expect(fakeClient.messages.create.mock.calls[1][0]).toMatchObject({ max_tokens: 8192 });
   });
 
   it("throws a clear error instead of returning a truncated summary when stop_reason is max_tokens", async () => {
