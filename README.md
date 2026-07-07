@@ -73,14 +73,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: aidanc667/archie@main
+      - uses: aidanc667/archie@v1
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 Then add an `ANTHROPIC_API_KEY` repo secret (Settings → Secrets and variables → Actions). Archie will comment its review directly on every pull request.
 
-`aidanc667/archie@main` is a composite Action (see [`action.yml`](action.yml)) — it checks out and builds Archie fresh on every run and posts the PR comment itself, so this is the entire setup; no manual multi-step workflow to copy. `top-n` is also configurable (`with: { top-n: '15' }`) if you want more files reviewed in detail per run.
+`aidanc667/archie@v1` is a composite Action (see [`action.yml`](action.yml)) — it checks out and builds Archie fresh on every run and posts the PR comment itself, so this is the entire setup; no manual multi-step workflow to copy. `top-n` is also configurable (`with: { top-n: '15' }`) if you want more files reviewed in detail per run.
 
 ## Testing
 
