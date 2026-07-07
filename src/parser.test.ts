@@ -30,6 +30,47 @@ describe("parseFile", () => {
     expect(result.imports).toEqual(["./helper", "os"]);
   });
 
+  // Regression coverage for a false claim found on a real report: Archie
+  // named four private, module-internal helper functions as part of a
+  // file's exported API (claiming "13 exported functions") and told a
+  // refactor step to modify those private helpers directly -- because
+  // nothing in the pipeline ever computed which functions/classes a file
+  // actually exports, leaving the report-generation LLM to guess from raw
+  // source text. This pins the actual detection logic per declaration
+  // style: a plain function/class declaration is exported only if wrapped
+  // in an export_statement; an arrow function assigned via `export const`
+  // is exported via its lexical_declaration parent two levels up; a class
+  // method is never independently exported regardless of its class.
+  it("marks TS functions/classes as exported only when actually wrapped in an export statement", async () => {
+    const filePath = path.resolve("fixtures/parser-basic/exports.ts");
+    const result = await parseFile(filePath);
+
+    const byName = (name: string) =>
+      [...result.functions, ...result.classes].find((f) => f.name === name);
+
+    expect(byName("publicFn")?.isExported).toBe(true);
+    expect(byName("privateFn")?.isExported).toBe(false);
+    expect(byName("publicArrow")?.isExported).toBe(true);
+    expect(byName("privateArrow")?.isExported).toBe(false);
+    expect(byName("PublicClass")?.isExported).toBe(true);
+    expect(byName("PrivateClass")?.isExported).toBe(false);
+    // A method is never independently exported, even inside an exported class.
+    expect(byName("method")?.isExported).toBe(false);
+  });
+
+  it("treats a Python name as exported unless it has a leading underscore (Python's own private convention)", async () => {
+    const filePath = path.resolve("fixtures/parser-basic/exports.py");
+    const result = await parseFile(filePath);
+
+    const byName = (name: string) =>
+      [...result.functions, ...result.classes].find((f) => f.name === name);
+
+    expect(byName("public_fn")?.isExported).toBe(true);
+    expect(byName("_private_fn")?.isExported).toBe(false);
+    expect(byName("PublicClass")?.isExported).toBe(true);
+    expect(byName("_PrivateClass")?.isExported).toBe(false);
+  });
+
   // Regression coverage for a bug found running archie from a GitHub Action
   // step in a repo other than archie's own: grammarsDir was resolved via
   // path.resolve("grammars"), which resolves against process.cwd(). When

@@ -14,7 +14,7 @@ describe("buildGraph", () => {
         {
           loc: 10,
           parsed: {
-            functions: [{ name: "doWork", startLine: 1, endLine: 3 }],
+            functions: [{ name: "doWork", startLine: 1, endLine: 3, isExported: true }],
             classes: [],
             imports: ["./b"],
           },
@@ -40,6 +40,44 @@ describe("buildGraph", () => {
     const importEdges = graph.edges.filter((e) => e.type === "IMPORTS");
     expect(importEdges).toHaveLength(1);
     expect(importEdges[0].confidence).toBe(1.0);
+  });
+
+  // Regression coverage for a false claim found on a real report: Archie
+  // named four private helper functions as exported (claiming "13 exported
+  // functions") because nothing tracked which functions/classes a file
+  // actually exports. EXPORTS edges (an edge type already defined in
+  // types.ts but never generated until now) make this a checkable graph
+  // fact instead of something the report-generation LLM has to guess.
+  it("emits an EXPORTS edge only for functions/classes actually marked isExported", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/src/a.ts",
+        {
+          loc: 20,
+          parsed: {
+            functions: [
+              { name: "publicFn", startLine: 1, endLine: 3, isExported: true },
+              { name: "privateFn", startLine: 5, endLine: 7, isExported: false },
+            ],
+            classes: [
+              { name: "PublicClass", startLine: 9, endLine: 12, isExported: true },
+              { name: "PrivateClass", startLine: 14, endLine: 16, isExported: false },
+            ],
+            imports: [],
+          },
+        },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo");
+
+    const exportsEdges = graph.edges.filter((e) => e.type === "EXPORTS");
+    expect(exportsEdges).toHaveLength(2);
+
+    const exportedNames = exportsEdges
+      .map((e) => graph.nodes.find((n) => n.id === e.to))
+      .map((n) => (n && "name" in n ? n.name : undefined));
+    expect(exportedNames.sort()).toEqual(["PublicClass", "publicFn"]);
   });
 
   it("resolves NodeNext-style imports that use a .js extension pointing at a .ts source file", () => {

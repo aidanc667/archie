@@ -66,7 +66,7 @@ describe("buildContextPack", () => {
   it("incrementally prunes the lowest-risk file when budget fits 2 of 3 but not all 3", () => {
     const pack = buildContextPack(makeThreeFileGraph(), makeThreeFileScores(), new Map(), {
       topN: 3,
-      maxTokens: 110,
+      maxTokens: 140,
     });
 
     expect(pack.mode).toBe("top-n-detail");
@@ -141,6 +141,68 @@ describe("buildContextPack", () => {
     const fileB = pack.topRiskFiles.find((f) => f.path === "b.ts");
     expect(fileA?.hasErrorHandling).toBe(true);
     expect(fileB?.hasErrorHandling).toBe(false);
+  });
+
+  // Regression coverage for a false claim found on a real report: Archie
+  // named four private helper functions as exported (claiming "13 exported
+  // functions") because nothing surfaced a file's real exported API surface
+  // as a checkable fact. exportedSymbols is that fact -- built from EXPORTS
+  // edges, so it can only ever list what's actually exported.
+  it("populates exportedSymbols from EXPORTS edges, excluding private/unexported symbols", () => {
+    const graph: CodeGraph = {
+      nodes: [
+        { kind: "file", id: "file:a.ts", path: "a.ts", loc: 50 },
+        { kind: "function", id: "function:a.ts:publicFn:1", name: "publicFn", fileId: "file:a.ts", startLine: 1, endLine: 3 },
+        { kind: "function", id: "function:a.ts:privateFn:5", name: "privateFn", fileId: "file:a.ts", startLine: 5, endLine: 7 },
+        { kind: "class", id: "class:a.ts:PublicClass:9", name: "PublicClass", fileId: "file:a.ts", startLine: 9, endLine: 12 },
+      ],
+      edges: [
+        { type: "CONTAINS", from: "file:a.ts", to: "function:a.ts:publicFn:1", confidence: 1.0 },
+        { type: "CONTAINS", from: "file:a.ts", to: "function:a.ts:privateFn:5", confidence: 1.0 },
+        { type: "CONTAINS", from: "file:a.ts", to: "class:a.ts:PublicClass:9", confidence: 1.0 },
+        { type: "EXPORTS", from: "file:a.ts", to: "function:a.ts:publicFn:1", confidence: 1.0 },
+        { type: "EXPORTS", from: "file:a.ts", to: "class:a.ts:PublicClass:9", confidence: 1.0 },
+      ],
+    };
+    const scores: RiskScore[] = [
+      { fileId: "file:a.ts", riskScore: 0.9, complexity: 5, fanIn: 0, loc: 50, dependencyDepth: 0 },
+    ];
+
+    const pack = buildContextPack(graph, scores, new Map(), { topN: 1, maxTokens: 50000 });
+
+    expect(pack.topRiskFiles[0].exportedSymbols.sort()).toEqual(["PublicClass", "publicFn"]);
+  });
+
+  it("excludes private symbols from the signature summary for files beyond the top 3 (full-source cutoff)", () => {
+    const graph: CodeGraph = {
+      nodes: [
+        { kind: "file", id: "file:d.ts", path: "d.ts", loc: 50 },
+        { kind: "function", id: "function:d.ts:publicFn:1", name: "publicFn", fileId: "file:d.ts", startLine: 1, endLine: 3 },
+        { kind: "function", id: "function:d.ts:privateFn:5", name: "privateFn", fileId: "file:d.ts", startLine: 5, endLine: 7 },
+      ],
+      edges: [
+        { type: "CONTAINS", from: "file:d.ts", to: "function:d.ts:publicFn:1", confidence: 1.0 },
+        { type: "CONTAINS", from: "file:d.ts", to: "function:d.ts:privateFn:5", confidence: 1.0 },
+        { type: "EXPORTS", from: "file:d.ts", to: "function:d.ts:publicFn:1", confidence: 1.0 },
+      ],
+    };
+    // 4 filler files ranked above "d.ts" so it lands at index 4 (beyond the
+    // top-3 full-source cutoff) and gets the signature-summary path instead.
+    const fillerNodes: CodeGraph["nodes"] = [];
+    const fillerScores: RiskScore[] = [];
+    for (let i = 0; i < 4; i++) {
+      const id = `file:filler${i}.ts`;
+      fillerNodes.push({ kind: "file", id, path: `filler${i}.ts`, loc: 5 });
+      fillerScores.push({ fileId: id, riskScore: 1 - i * 0.01, complexity: 1, fanIn: 0, loc: 5, dependencyDepth: 0 });
+    }
+    const fullGraph: CodeGraph = { nodes: [...fillerNodes, ...graph.nodes], edges: graph.edges };
+    const scores: RiskScore[] = [...fillerScores, { fileId: "file:d.ts", riskScore: 0.5, complexity: 5, fanIn: 0, loc: 50, dependencyDepth: 0 }];
+
+    const pack = buildContextPack(fullGraph, scores, new Map(), { topN: 5, maxTokens: 50000 });
+
+    const fileD = pack.topRiskFiles.find((f) => f.path === "d.ts");
+    expect(fileD?.source).toContain("publicFn");
+    expect(fileD?.source).not.toContain("privateFn");
   });
 
   // Regression coverage for a bug found on a real report: the System Summary

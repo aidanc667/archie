@@ -269,6 +269,15 @@ export function buildGraph(
         endLine: fn.endLine,
       });
       edges.push({ type: "CONTAINS", from: fileId, to: fnId, confidence: 1.0 });
+      // Distinct from CONTAINS: this is what lets a consumer ask "is this
+      // function actually part of the file's public API" as a checked graph
+      // fact, rather than the report-generation LLM having to guess from raw
+      // source text -- which, on a real report, led to four private helper
+      // functions being named as exported and a refactor step being aimed at
+      // them directly instead of their actual (exported) call site.
+      if (fn.isExported) {
+        edges.push({ type: "EXPORTS", from: fileId, to: fnId, confidence: 1.0 });
+      }
     }
 
     for (const cls of entry.parsed.classes) {
@@ -282,6 +291,9 @@ export function buildGraph(
         endLine: cls.endLine,
       });
       edges.push({ type: "CONTAINS", from: fileId, to: clsId, confidence: 1.0 });
+      if (cls.isExported) {
+        edges.push({ type: "EXPORTS", from: fileId, to: clsId, confidence: 1.0 });
+      }
     }
   }
 

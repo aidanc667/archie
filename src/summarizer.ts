@@ -46,6 +46,12 @@ export interface TopRiskFile {
   source: string;
   hasTests: boolean;
   hasErrorHandling: boolean;
+  // The file's actual exported API surface, per EXPORTS edges in the graph --
+  // a checked fact, not something to infer from the raw source. Found
+  // missing on a real report: without this, the model named four private,
+  // module-internal helper functions as "exported" and aimed a refactor
+  // step directly at them instead of their real (exported) call site.
+  exportedSymbols: string[];
 }
 
 export interface ClusterSummary {
@@ -90,10 +96,25 @@ function hasErrorHandling(source: string): boolean {
   return /\btry\s*\{/.test(source) || /\.catch\s*\(/.test(source);
 }
 
-function buildSignatureSummary(graph: CodeGraph, fileId: string): string {
+function exportedNodeIds(graph: CodeGraph): Set<string> {
+  const set = new Set<string>();
+  for (const edge of graph.edges) {
+    if (edge.type === "EXPORTS") set.add(edge.to);
+  }
+  return set;
+}
+
+// Found returning every function/class in the file regardless of export
+// status on a real report, despite its own "[no exports detected]" label
+// implying otherwise -- meaning ranks 4-10 (signature-summary only, no full
+// source) presented private, module-internal helpers to the model
+// indistinguishably from the file's actual public API. Now filters to
+// exported symbols only, matching what the label always claimed to show.
+function buildSignatureSummary(graph: CodeGraph, fileId: string, exported: Set<string>): string {
   const functions: string[] = [];
   const classes: string[] = [];
   for (const node of graph.nodes) {
+    if (!exported.has(node.id)) continue;
     if (node.kind === "function" && node.fileId === fileId) functions.push(node.name);
     else if (node.kind === "class" && node.fileId === fileId) classes.push(node.name);
   }
@@ -102,6 +123,12 @@ function buildSignatureSummary(graph: CodeGraph, fileId: string): string {
   if (functions.length > 0) parts.push(`[functions: ${functions.join(", ")}]`);
   if (classes.length > 0) parts.push(`[classes: ${classes.join(", ")}]`);
   return parts.join(" ");
+}
+
+function exportedSymbolsForFile(graph: CodeGraph, fileId: string, exported: Set<string>): string[] {
+  return graph.nodes
+    .filter((n) => (n.kind === "function" || n.kind === "class") && n.fileId === fileId && exported.has(n.id))
+    .map((n) => (n as { name: string }).name);
 }
 
 function buildSystemSummary(graph: CodeGraph): SystemSummary {
@@ -131,6 +158,7 @@ export function buildContextPack(
   const paths = pathByFileId(graph);
   const systemSummary = buildSystemSummary(graph);
   const tested = testedFileIds(graph);
+  const exported = exportedNodeIds(graph);
 
   const sorted = [...scores].sort((a, b) => b.riskScore - a.riskScore);
   let topN = sorted.slice(0, options.topN);
@@ -145,9 +173,10 @@ export function buildContextPack(
       loc: s.loc,
       source: index < 3
         ? (sourceByPath.get(s.fileId) ?? "")
-        : buildSignatureSummary(graph, s.fileId),
+        : buildSignatureSummary(graph, s.fileId, exported),
       hasTests: tested.has(s.fileId),
       hasErrorHandling: hasErrorHandling(sourceByPath.get(s.fileId) ?? ""),
+      exportedSymbols: exportedSymbolsForFile(graph, s.fileId, exported),
     }));
 
     const includedIds = new Set(topN.map((s) => s.fileId));

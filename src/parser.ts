@@ -17,12 +17,14 @@ export interface ParsedFunction {
   name: string;
   startLine: number;
   endLine: number;
+  isExported: boolean;
 }
 
 export interface ParsedClass {
   name: string;
   startLine: number;
   endLine: number;
+  isExported: boolean;
 }
 
 export interface ParsedFile {
@@ -121,23 +123,44 @@ async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
 
   const isPython = path.extname(filePath) === ".py";
 
+  // Exported status found missing entirely in an earlier version of this
+  // pipeline: nothing computed or tracked which functions/classes a file
+  // actually exports, so the report-generation LLM had to eyeball raw source
+  // text to guess a file's "public API" -- and on a real report, it named
+  // four private, module-internal helper functions as exported and told a
+  // refactor step to modify them directly, when the real fix boundary was
+  // the actual exported function that calls them. TS/JS exported status is
+  // syntactic (wrapped in an export_statement); Python has no export
+  // keyword, so a leading underscore is used as the closest equivalent to
+  // its own "private by convention" idiom.
+  const isExportStatement = (node: Parser.SyntaxNode | null): boolean =>
+    node !== null && node.type === "export_statement";
+
   walkTree(tree.rootNode, (node) => {
     if (node.type === "function_declaration" || node.type === "function_definition") {
       const nameNode = node.childForFieldName("name");
       if (nameNode) {
+        const isExported = isPython
+          ? !nameNode.text.startsWith("_")
+          : isExportStatement(node.parent);
         functions.push({
           name: nameNode.text,
           startLine: node.startPosition.row + 1,
           endLine: node.endPosition.row + 1,
+          isExported,
         });
       }
     } else if (node.type === "class_declaration" || node.type === "class_definition") {
       const nameNode = node.childForFieldName("name");
       if (nameNode) {
+        const isExported = isPython
+          ? !nameNode.text.startsWith("_")
+          : isExportStatement(node.parent);
         classes.push({
           name: nameNode.text,
           startLine: node.startPosition.row + 1,
           endLine: node.endPosition.row + 1,
+          isExported,
         });
       }
     } else if (!isPython && node.type === "import_statement") {
@@ -157,20 +180,28 @@ async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
       if (valueNode && (valueNode.type === "arrow_function" || valueNode.type === "function_expression")) {
         const nameNode = node.childForFieldName("name");
         if (nameNode) {
+          // export const foo = () => {} nests as
+          // export_statement > lexical_declaration > variable_declarator,
+          // two levels up rather than one.
           functions.push({
             name: nameNode.text,
             startLine: node.startPosition.row + 1,
             endLine: node.endPosition.row + 1,
+            isExported: isExportStatement(node.parent?.parent ?? null),
           });
         }
       }
     } else if (!isPython && node.type === "method_definition") {
       const nameNode = node.childForFieldName("name");
       if (nameNode && nameNode.text !== "constructor") {
+        // A method can't be imported independently of its class, regardless
+        // of whether the class itself is exported -- "exported" here means
+        // "directly importable by another file", which no method is.
         functions.push({
           name: nameNode.text,
           startLine: node.startPosition.row + 1,
           endLine: node.endPosition.row + 1,
+          isExported: false,
         });
       }
     } else if (isPython && node.type === "import_from_statement") {
