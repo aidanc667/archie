@@ -53,6 +53,44 @@ describe("parseFile", () => {
       process.chdir(originalCwd);
     }
   });
+
+  // Regression coverage found via Archie's own self-analysis: ensureInitialized
+  // used a bare `initialized` boolean with no single-flight guard, so
+  // concurrent callers could all observe `initialized === false` before any
+  // of them finished loading the grammars, each redundantly re-running
+  // initialization and racing to reassign the shared language variables. Uses
+  // a fresh, un-initialized module (vi.resetModules()) so the very first
+  // calls genuinely race through initialization concurrently, across all
+  // three languages, rather than hitting an already-memoized fast path.
+  it("returns correct results for all three languages when parsed concurrently on first use", async () => {
+    vi.resetModules();
+    const freshParser = await import("./parser.js");
+
+    const tsPath = path.resolve("fixtures/parser-basic/sample.ts");
+    const pyPath = path.resolve("fixtures/parser-basic/sample.py");
+    const branchyPath = path.resolve("fixtures/parser-basic/branchy.ts");
+
+    const [tsResult, pyResult, branchyComplexity] = await Promise.all([
+      freshParser.parseFile(tsPath),
+      freshParser.parseFile(pyPath),
+      freshParser.computeComplexity(branchyPath),
+    ]);
+
+    expect(tsResult.functions.map((f) => f.name)).toEqual(["doWork", "run"]);
+    expect(pyResult.functions.map((f) => f.name)).toEqual(["do_work", "run"]);
+    expect(branchyComplexity).toBe(5);
+  });
+
+  // Regression coverage found via Archie's own self-analysis: parseFile had
+  // no error handling, so one unreadable/unparseable file in the target repo
+  // (a vendored .min.js, a generated file, a symlink resolving to nothing)
+  // would abort analysis of the entire repo with a raw, uncaught exception --
+  // even though every other file was perfectly parseable.
+  it("does not throw when a file cannot be read, returning an empty result instead", async () => {
+    const nonexistentPath = path.resolve("fixtures/parser-basic/does-not-exist.ts");
+    const result = await parseFile(nonexistentPath);
+    expect(result).toEqual({ functions: [], classes: [], imports: [] });
+  });
 });
 
 describe("computeComplexity", () => {
@@ -66,5 +104,11 @@ describe("computeComplexity", () => {
     const filePath = path.resolve("fixtures/parser-basic/logical.ts");
     const complexity = await computeComplexity(filePath);
     expect(complexity).toBe(3);
+  });
+
+  it("does not throw when a file cannot be read, returning base complexity instead", async () => {
+    const nonexistentPath = path.resolve("fixtures/parser-basic/does-not-exist.ts");
+    const complexity = await computeComplexity(nonexistentPath);
+    expect(complexity).toBe(1);
   });
 });

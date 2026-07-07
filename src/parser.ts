@@ -31,25 +31,36 @@ export interface ParsedFile {
   imports: string[];
 }
 
-let initialized = false;
 let tsLanguage: Parser.Language | undefined;
 let jsLanguage: Parser.Language | undefined;
 let pyLanguage: Parser.Language | undefined;
 
-async function ensureInitialized(): Promise<void> {
-  if (initialized) return;
-  await Parser.init();
-  const grammarsDir = path.resolve(MODULE_DIR, "..", "grammars");
-  tsLanguage = await Parser.Language.load(
-    path.join(grammarsDir, "tree-sitter-typescript.wasm")
-  );
-  jsLanguage = await Parser.Language.load(
-    path.join(grammarsDir, "tree-sitter-javascript.wasm")
-  );
-  pyLanguage = await Parser.Language.load(
-    path.join(grammarsDir, "tree-sitter-python.wasm")
-  );
-  initialized = true;
+// Single-flight guard found missing via Archie's own self-analysis: a bare
+// `initialized` boolean lets concurrent callers all observe `false` before
+// any of them finishes awaiting Parser.init() and the three grammar loads,
+// so each would redundantly re-run initialization and race to reassign
+// tsLanguage/jsLanguage/pyLanguage. Sharing one in-flight promise means every
+// caller, no matter how many arrive concurrently, awaits the exact same
+// initialization instead of racing to start their own.
+let initPromise: Promise<void> | undefined;
+
+function ensureInitialized(): Promise<void> {
+  if (!initPromise) {
+    initPromise = (async () => {
+      await Parser.init();
+      const grammarsDir = path.resolve(MODULE_DIR, "..", "grammars");
+      tsLanguage = await Parser.Language.load(
+        path.join(grammarsDir, "tree-sitter-typescript.wasm")
+      );
+      jsLanguage = await Parser.Language.load(
+        path.join(grammarsDir, "tree-sitter-javascript.wasm")
+      );
+      pyLanguage = await Parser.Language.load(
+        path.join(grammarsDir, "tree-sitter-python.wasm")
+      );
+    })();
+  }
+  return initPromise;
 }
 
 function languageFor(filePath: string): Parser.Language {
@@ -80,8 +91,24 @@ function pythonRelativeToPath(moduleText: string): string | undefined {
   return prefix + remainder.replace(/\./g, "/");
 }
 
+// A single malformed, binary, or unusually-encoded file walking an arbitrary
+// target repo (vendored .min.js, generated protobuf output, a data file with
+// a misleading extension) can throw during tree-sitter parsing. Without this
+// isolation, one bad file aborts the entire pipeline with a raw stack trace
+// and no report at all, even though every other file was perfectly parseable
+// -- found via Archie's own self-analysis of this same function.
 export async function parseFile(filePath: string): Promise<ParsedFile> {
   await ensureInitialized();
+  try {
+    return await parseFileUnsafe(filePath);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[archie] Skipping unparseable file: ${filePath} — ${message}`);
+    return { functions: [], classes: [], imports: [] };
+  }
+}
+
+async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
   const source = await readFile(filePath, "utf8");
 
   const parser = new Parser();
@@ -177,8 +204,21 @@ const BRANCH_NODE_TYPES = new Set([
   "boolean_operator",
 ]);
 
+// Same per-file isolation as parseFile: one unparseable file shouldn't abort
+// complexity scoring for the rest of the repo. Falls back to base complexity
+// (1) rather than throwing.
 export async function computeComplexity(filePath: string): Promise<number> {
   await ensureInitialized();
+  try {
+    return await computeComplexityUnsafe(filePath);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[archie] Skipping unparseable file: ${filePath} — ${message}`);
+    return 1;
+  }
+}
+
+async function computeComplexityUnsafe(filePath: string): Promise<number> {
   const source = await readFile(filePath, "utf8");
 
   const parser = new Parser();
