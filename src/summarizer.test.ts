@@ -1,6 +1,9 @@
 // src/summarizer.test.ts
 import { describe, it, expect } from "vitest";
-import { buildContextPack } from "./summarizer.js";
+import path from "node:path";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { buildContextPack, loadDependencies } from "./summarizer.js";
 import type { CodeGraph } from "./types.js";
 import type { RiskScore } from "./metrics.js";
 
@@ -138,5 +141,91 @@ describe("buildContextPack", () => {
     const fileB = pack.topRiskFiles.find((f) => f.path === "b.ts");
     expect(fileA?.hasErrorHandling).toBe(true);
     expect(fileB?.hasErrorHandling).toBe(false);
+  });
+
+  // Regression coverage for a bug found on a real report: the System Summary
+  // claimed "Next.js 14" for a target repo whose actual package.json said
+  // "next": "16.2.2" -- the version was guessed from file-structure
+  // conventions instead of read from the manifest. This pins that a
+  // dependencies map passed into buildContextPack shows up verbatim in the
+  // pack for the prompt to cite.
+  it("includes a dependencies map in the pack when provided", () => {
+    const pack = buildContextPack(
+      makeGraph(),
+      makeScores(),
+      new Map(),
+      { topN: 1, maxTokens: 50000 },
+      { next: "16.2.2", react: "19.0.0" }
+    );
+
+    expect(pack.dependencies).toEqual({ next: "16.2.2", react: "19.0.0" });
+  });
+
+  it("leaves dependencies undefined when none is provided", () => {
+    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 50000 });
+
+    expect(pack.dependencies).toBeUndefined();
+  });
+
+  it("includes dependencies in the cluster-summary fallback too", () => {
+    const pack = buildContextPack(
+      makeGraph(),
+      makeScores(),
+      new Map(),
+      { topN: 1, maxTokens: 1 },
+      { next: "16.2.2" }
+    );
+
+    expect(pack.mode).toBe("cluster-summary");
+    expect(pack.dependencies).toEqual({ next: "16.2.2" });
+  });
+});
+
+describe("loadDependencies", () => {
+  async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
+    const dir = await mkdtemp(path.join(tmpdir(), "archie-deps-test-"));
+    try {
+      await fn(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("merges dependencies and devDependencies from package.json", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(
+        path.join(dir, "package.json"),
+        JSON.stringify({
+          dependencies: { next: "16.2.2", react: "19.0.0" },
+          devDependencies: { typescript: "5.6.3" },
+        })
+      );
+
+      const deps = await loadDependencies(dir);
+      expect(deps).toEqual({ next: "16.2.2", react: "19.0.0", typescript: "5.6.3" });
+    });
+  });
+
+  it("returns undefined when package.json does not exist", async () => {
+    await withTempDir(async (dir) => {
+      const deps = await loadDependencies(dir);
+      expect(deps).toBeUndefined();
+    });
+  });
+
+  it("returns undefined for malformed JSON rather than throwing", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(path.join(dir, "package.json"), "{ not valid json");
+      const deps = await loadDependencies(dir);
+      expect(deps).toBeUndefined();
+    });
+  });
+
+  it("returns undefined when package.json has neither dependencies nor devDependencies", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(path.join(dir, "package.json"), JSON.stringify({ name: "some-repo" }));
+      const deps = await loadDependencies(dir);
+      expect(deps).toBeUndefined();
+    });
   });
 });

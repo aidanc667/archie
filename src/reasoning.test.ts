@@ -6,6 +6,7 @@ import {
   generateSimplifiedSummary,
   ABSENCE_CLAIM_RULE,
   SCENARIO_GROUNDING_RULE,
+  DEPENDENCY_GROUNDING_RULE,
 } from "./reasoning.js";
 import type { ContextPack } from "./summarizer.js";
 
@@ -780,6 +781,57 @@ describe("SCENARIO_GROUNDING_RULE", () => {
   it("forbids asserting a specific attacker-controlled call chain unless graphSnapshot or source shows it", () => {
     expect(SCENARIO_GROUNDING_RULE).toMatch(/graphSnapshot/);
     expect(SCENARIO_GROUNDING_RULE.toLowerCase()).toMatch(/conditionally/);
+  });
+});
+
+// Regression coverage for a bug found on a real report: the System Summary
+// claimed "Next.js 14" for a target repo whose actual package.json said
+// "next": "16.2.2" -- the LLM was inferring a version from file-structure
+// conventions rather than reading the manifest, because nothing in the
+// prompt required otherwise and package.json was never even parsed.
+describe("DEPENDENCY_GROUNDING_RULE", () => {
+  it("forbids inferring or guessing a framework version instead of quoting it from the dependencies field", () => {
+    expect(DEPENDENCY_GROUNDING_RULE).toMatch(/dependencies/);
+    expect(DEPENDENCY_GROUNDING_RULE.toLowerCase()).toMatch(/do not guess or infer/);
+  });
+
+  it("is included in the system prompt sent to Claude for both passes", async () => {
+    const remainingText = [
+      "## 1. System Summary\ncontent",
+      "## 3. Production Failure Scenarios\ncontent",
+      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 5. Senior Engineer Verdict\ncontent",
+    ].join("\n\n");
+
+    const fakeClient = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
+          .mockResolvedValueOnce({
+            content: [{ type: "text", text: remainingText }],
+            usage: { input_tokens: 200, output_tokens: 150 },
+          }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+      dependencies: { next: "16.2.2" },
+    };
+
+    await generateReport(fakeClient as any, pack);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    expect(calls[0][0].system).toContain("Do not guess or infer");
+    expect(calls[1][0].system).toContain("Do not guess or infer");
+    // The dependencies map itself is serialized into pass 1's user message
+    // (the Context Pack JSON), so the actual version string reaches the model.
+    expect(calls[0][0].messages[0].content).toContain("16.2.2");
   });
 });
 

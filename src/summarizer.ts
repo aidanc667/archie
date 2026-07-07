@@ -1,4 +1,6 @@
 // src/summarizer.ts
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import type { CodeGraph } from "./types.js";
 import type { RiskScore } from "./metrics.js";
 
@@ -10,6 +12,29 @@ export interface ContextPackOptions {
 export interface SystemSummary {
   fileCount: number;
   totalLoc: number;
+}
+
+// Loads and merges dependencies + devDependencies from the target repo's
+// root package.json, so the report-generation prompt can cite exact,
+// verified framework/library versions instead of guessing them from code
+// patterns (e.g. inferring "Next.js 14" from App Router file conventions
+// that look nearly identical across several major versions -- found on a
+// real report where the target's package.json said "next": "16.2.2" but
+// the generated System Summary claimed "Next.js 14"). Fails open (returns
+// undefined) if package.json is missing or malformed -- Python repos and
+// other edge cases shouldn't break the pipeline over this.
+export async function loadDependencies(root: string): Promise<Record<string, string> | undefined> {
+  try {
+    const content = await readFile(path.join(root, "package.json"), "utf8");
+    const pkg = JSON.parse(content) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const merged = { ...pkg.dependencies, ...pkg.devDependencies };
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface TopRiskFile {
@@ -35,6 +60,7 @@ export interface ContextPack {
   topRiskFiles: TopRiskFile[];
   graphSnapshot: { from: string; to: string; type: string }[];
   clusters: ClusterSummary[];
+  dependencies?: Record<string, string>;
 }
 
 // Rough token estimate: ~4 characters per token. This measures the length of the
@@ -99,7 +125,8 @@ export function buildContextPack(
   graph: CodeGraph,
   scores: RiskScore[],
   sourceByPath: Map<string, string>,
-  options: ContextPackOptions
+  options: ContextPackOptions,
+  dependencies?: Record<string, string>
 ): ContextPack {
   const paths = pathByFileId(graph);
   const systemSummary = buildSystemSummary(graph);
@@ -128,7 +155,7 @@ export function buildContextPack(
       .filter((e) => includedIds.has(e.from) || includedIds.has(e.to))
       .map((e) => ({ from: paths.get(e.from) ?? e.from, to: paths.get(e.to) ?? e.to, type: e.type }));
 
-    const candidate = { systemSummary, topRiskFiles, graphSnapshot, clusters: [] };
+    const candidate = { systemSummary, topRiskFiles, graphSnapshot, clusters: [], dependencies };
 
     if (estimateTokens(candidate) <= options.maxTokens) {
       return { mode: "top-n-detail", ...candidate };
@@ -144,5 +171,6 @@ export function buildContextPack(
     topRiskFiles: [],
     graphSnapshot: [],
     clusters: buildClusterSummary(scores),
+    dependencies,
   };
 }

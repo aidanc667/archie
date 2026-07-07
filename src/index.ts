@@ -7,7 +7,7 @@ import { walkRepo } from "./walker.js";
 import { parseFile, computeComplexity } from "./parser.js";
 import { buildGraph, loadPathAliases, type FileEntry } from "./graph.js";
 import { computeRiskScores } from "./metrics.js";
-import { buildContextPack } from "./summarizer.js";
+import { buildContextPack, loadDependencies } from "./summarizer.js";
 import { generateReport, generateSimplifiedSummary } from "./reasoning.js";
 import type { CodeGraph } from "./types.js";
 import { hashContent, loadCache, saveCache } from "./cache.js";
@@ -104,9 +104,16 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   }
 
   const aliases = await loadPathAliases(root);
+  const dependencies = await loadDependencies(root);
   const graph = buildGraph(parsedByFile, root, aliases);
   const scores = computeRiskScores(graph, complexityByFile);
-  const pack = buildContextPack(graph, scores, sourceByPath, { topN: options.topN, maxTokens: options.maxTokens });
+  const pack = buildContextPack(
+    graph,
+    scores,
+    sourceByPath,
+    { topN: options.topN, maxTokens: options.maxTokens },
+    dependencies
+  );
 
   const useHistory = !options.noCache;
   const previousHistory = useHistory ? await loadHistory(root) : null;
