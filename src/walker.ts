@@ -9,6 +9,27 @@ const ignore = ignorePkg as unknown as (options?: unknown) => Ignore;
 const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".py"]);
 const ALWAYS_EXCLUDED = new Set(["node_modules", ".git"]);
 
+// Archie's own declared package name. A CI workflow that checks out a target
+// repo to the working directory root and then clones Archie itself into a
+// subdirectory (e.g. `archie-tool/`) before running `analyze .` causes
+// Archie to walk into its own freshly-cloned source and analyze it as if it
+// were part of the target repo -- inflating file/LOC counts and attributing
+// Archie's own test coverage and risk findings to the target codebase. This
+// only excludes NESTED occurrences found while walking; the root directory
+// itself is never checked, so intentional self-analysis (`analyze .` run
+// directly against Archie's own repo) is unaffected.
+const ARCHIE_OWN_PACKAGE_NAME = "archie";
+
+async function isArchieOwnCheckout(dir: string): Promise<boolean> {
+  try {
+    const content = await readFile(path.join(dir, "package.json"), "utf8");
+    const pkg = JSON.parse(content) as { name?: unknown };
+    return pkg.name === ARCHIE_OWN_PACKAGE_NAME;
+  } catch {
+    return false;
+  }
+}
+
 async function loadIgnore(root: string): Promise<Ignore> {
   const ig = ignore();
   try {
@@ -33,6 +54,7 @@ export async function walkRepo(root: string): Promise<string[]> {
       if (entry.isDirectory()) {
         if (ALWAYS_EXCLUDED.has(entry.name)) continue;
         if (ig.ignores(relPath)) continue;
+        if (await isArchieOwnCheckout(fullPath)) continue;
         await visit(fullPath);
       } else if (entry.isFile()) {
         if (ig.ignores(relPath)) continue;
