@@ -1,7 +1,7 @@
 {
   "name": "archie",
   "description": "AI Staff Engineer architecture analysis for a local repo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "repository": {
     "type": "git",
