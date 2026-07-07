@@ -6,7 +6,7 @@ It runs two ways: as a CLI you point at any local repo, or as a step in a GitHub
 
 ## See it in action
 
-[`examples/deepinsight-report.md`](examples/deepinsight-report.md) is a real, unedited report from a live run against [DeepInsight](https://github.com/aidanc667/DeepInsight), a ~15,500 LOC production Next.js/TypeScript app. It caught a client-side-only auth bypass, a race condition in concurrent promise handling, an untested 986-line god-component, and a stale-cache product integrity bug — with root causes, reproduction scenarios, and a step-by-step refactor plan formatted to paste directly into Claude Code.
+[`examples/deepinsight-report.md`](examples/deepinsight-report.md) is a real, unedited report from a live run against [DeepInsight](https://github.com/aidanc667/DeepInsight), a ~7,000 LOC production Next.js/TypeScript app. It caught a race condition in concurrent promise handling, a client-side auth guard with no corresponding code that ever sets the session key it checks, an untested 986-line god-component, and a fan-in-15 data transformer with no error handling — with root causes, reproduction scenarios, and a step-by-step refactor plan formatted to paste directly into Claude Code.
 
 ## Quickstart
 
