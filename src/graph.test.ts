@@ -211,6 +211,46 @@ describe("buildGraph", () => {
     const importEdges = graph.edges.filter((e) => e.type === "IMPORTS");
     expect(importEdges).toHaveLength(0);
   });
+
+  // Regression coverage for a false-negative found via Archie's own
+  // self-analysis: parser.ts pushes Python absolute imports (`import foo.bar`)
+  // as the raw dotted name with no path conversion, so this edge was always
+  // silently dropped, quietly undercounting fan-in for every locally-imported
+  // Python module -- exactly the same class of bug as the __tests__/
+  // directory case, just for a different import style.
+  it("resolves a Python absolute import (e.g. `import foo.bar`) to the corresponding local file", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/main.py",
+        { loc: 10, parsed: { functions: [], classes: [], imports: ["foo.bar"] } },
+      ],
+      [
+        "/repo/foo/bar.py",
+        { loc: 5, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo");
+
+    const importEdges = graph.edges.filter((e) => e.type === "IMPORTS");
+    expect(importEdges).toHaveLength(1);
+    expect(importEdges[0].from).toBe("file:main.py");
+    expect(importEdges[0].to).toBe("file:foo/bar.py");
+  });
+
+  it("leaves a Python absolute import unresolved when it refers to a genuine third-party package", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/main.py",
+        { loc: 10, parsed: { functions: [], classes: [], imports: ["requests"] } },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo");
+
+    const importEdges = graph.edges.filter((e) => e.type === "IMPORTS");
+    expect(importEdges).toHaveLength(0);
+  });
 });
 
 describe("loadPathAliases", () => {

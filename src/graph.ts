@@ -126,6 +126,8 @@ function resolveImport(
   fromFile: string,
   importSpecifier: string,
   fileIdByAbsPath: Map<string, string>,
+  root: string,
+  isPython: boolean,
   aliases: PathAliasRule[] = []
 ): string | undefined {
   const knownExtensions = [".ts", ".tsx", ".js", ".jsx", ".py"];
@@ -148,6 +150,19 @@ function resolveImport(
   if (importSpecifier.startsWith(".")) {
     const baseDir = path.dirname(fromFile);
     return resolveCandidates(path.resolve(baseDir, importSpecifier));
+  }
+
+  // Python absolute imports (e.g. `import foo.bar`) are rooted at the repo
+  // root, not the importing file's directory -- parser.ts pushes these as
+  // the raw dotted name ("foo.bar") with no path conversion, so without this
+  // they never match a real file and the edge is silently dropped, quietly
+  // undercounting fan-in for every locally-imported Python module. A genuine
+  // third-party package (e.g. `import requests`) simply won't match any
+  // known file here and falls through with no edge created, same as today.
+  if (isPython) {
+    const asRelativePath = importSpecifier.replace(/\./g, "/");
+    const found = resolveCandidates(path.resolve(root, asRelativePath));
+    if (found) return found;
   }
 
   // Non-relative specifier: try tsconfig/jsconfig "paths" aliases (e.g. `@/*`)
@@ -276,9 +291,10 @@ export function buildGraph(
   // count as a single dependency edge, not inflate fan-in.
   for (const [absPath, entry] of parsedByFile) {
     const fileId = fileIdByAbsPath.get(absPath)!;
+    const isPython = path.extname(absPath) === ".py";
     const resolvedTargets = new Set<string>();
     for (const importSpecifier of entry.parsed.imports) {
-      const targetId = resolveImport(absPath, importSpecifier, fileIdByAbsPath, aliases);
+      const targetId = resolveImport(absPath, importSpecifier, fileIdByAbsPath, root, isPython, aliases);
       if (targetId) {
         resolvedTargets.add(targetId);
       }
