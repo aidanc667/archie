@@ -310,6 +310,7 @@ async function extractRisks(
       const risksResponse = await client.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 8192,
+        temperature: 0,
         system: `${SYSTEM_PROMPT}\n\n${CONFIDENCE_RULES}`,
         messages: [
           {
@@ -388,6 +389,7 @@ Write exactly these four sections with these exact headings (no section 2):
   const remainingResponse = await client.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 6144,
+    temperature: 0,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: remainingSectionsPrompt }],
   });
@@ -516,6 +518,7 @@ export async function generateSimplifiedSummary(
   const response = await client.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 4096,
+    temperature: 0,
     system: SIMPLIFIED_SUMMARY_SYSTEM_PROMPT,
     messages: [{ role: "user", content: technicalReport }],
   });

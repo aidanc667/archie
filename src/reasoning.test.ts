@@ -106,6 +106,48 @@ describe("generateReport", () => {
     expect(usage).toEqual({ inputTokens: 300, outputTokens: 200 });
   });
 
+  // Regression test: the same repo (same context pack) produced different
+  // "Top 5 Architectural Risks" selections between a local CLI run and a
+  // GitHub Actions run, because neither Claude call set a temperature,
+  // defaulting to the API's maximum-variance setting. This pins both calls
+  // to temperature 0 so the same input reliably produces the same output
+  // regardless of which environment ran it.
+  it("calls both passes with temperature 0 for reproducible output", async () => {
+    const remainingText = [
+      "## 1. System Summary\ncontent",
+      "## 3. Production Failure Scenarios\ncontent",
+      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 5. Senior Engineer Verdict\ncontent",
+    ].join("\n\n");
+
+    const fakeClient = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
+          .mockResolvedValueOnce({
+            content: [{ type: "text", text: remainingText }],
+            usage: { input_tokens: 200, output_tokens: 150 },
+          }),
+      },
+    };
+
+    const pack: ContextPack = {
+      mode: "top-n-detail",
+      systemSummary: { fileCount: 1, totalLoc: 10 },
+      topRiskFiles: [],
+      graphSnapshot: [],
+      clusters: [],
+    };
+
+    await generateReport(fakeClient as any, pack);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][0]).toMatchObject({ temperature: 0 });
+    expect(calls[1][0]).toMatchObject({ temperature: 0 });
+  });
+
   it("throws when pass 1 does not return a tool_use block", async () => {
     const fakeClient = {
       messages: {
@@ -680,6 +722,24 @@ describe("generateSimplifiedSummary", () => {
     expect(summary).toBe(simplifiedText);
     expect(usage).toEqual({ inputTokens: 100, outputTokens: 50 });
     expect(fakeClient.messages.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls Claude with temperature 0 for reproducible summaries", async () => {
+    const fakeClient = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [{
+            type: "text",
+            text: "# What This System Does\n\nThis tool checks code quality.\n\n# Bottom Line\n\nWorks fine, some cleanup needed.",
+          }],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+      },
+    };
+
+    await generateSimplifiedSummary(fakeClient as any, "## 1. System Summary\nDetailed technical report content here.");
+
+    expect(fakeClient.messages.create.mock.calls[0][0]).toMatchObject({ temperature: 0 });
   });
 
   it("throws a clear error instead of returning a truncated summary when stop_reason is max_tokens", async () => {
