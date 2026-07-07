@@ -73,34 +73,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/checkout@v4
+      - uses: aidanc667/archie@main
         with:
-          repository: aidanc667/archie
-          path: archie-tool
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - run: npm ci
-        working-directory: archie-tool
-
-      - run: npm run build
-        working-directory: archie-tool
-
-      - env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: node archie-tool/dist/cli.js analyze . --diff ${{ github.event.pull_request.base.sha }} --json > archie-output.json
-
-      - env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: node archie-tool/scripts/post-pr-comment.mjs archie-output.json
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 Then add an `ANTHROPIC_API_KEY` repo secret (Settings → Secrets and variables → Actions). Archie will comment its review directly on every pull request.
 
+`aidanc667/archie@main` is a composite Action (see [`action.yml`](action.yml)) — it checks out and builds Archie fresh on every run and posts the PR comment itself, so this is the entire setup; no manual multi-step workflow to copy. `top-n` is also configurable (`with: { top-n: '15' }`) if you want more files reviewed in detail per run.
+
 ## Testing
 
-`npm test` runs 96 tests across 14 files (Vitest), covering the parser, graph construction, risk scoring, the fix pipeline, and CLI integration.
+`npm test` runs 125 tests across 15 files (Vitest), covering the parser, graph construction, risk scoring, the fix pipeline, and CLI integration.

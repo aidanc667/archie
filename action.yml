@@ -1,0 +1,57 @@
+name: 'Archie Architecture Review'
+description: 'AI-powered architecture and risk analysis for pull requests, grounded in a parsed dependency graph and powered by Claude'
+author: 'aidanc667'
+branding:
+  icon: 'search'
+  color: 'green'
+
+inputs:
+  anthropic-api-key:
+    description: 'Anthropic API key used to run the analysis'
+    required: true
+  github-token:
+    description: 'Token used to post the PR comment'
+    required: false
+    default: ${{ github.token }}
+  top-n:
+    description: 'Number of top-risk files to review in detail'
+    required: false
+    default: '10'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout Archie
+      uses: actions/checkout@v4
+      with:
+        repository: aidanc667/archie
+        path: archie-tool
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Install Archie dependencies
+      shell: bash
+      working-directory: archie-tool
+      run: npm ci
+
+    - name: Build Archie
+      shell: bash
+      working-directory: archie-tool
+      run: npm run build
+
+    - name: Run Archie analysis
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+      run: node archie-tool/dist/cli.js analyze . --topN ${{ inputs.top-n }} --diff ${{ github.event.pull_request.base.sha }} --json > archie-output.json
+
+    - name: Post PR comment
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: node archie-tool/scripts/post-pr-comment.mjs archie-output.json
