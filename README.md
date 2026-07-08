@@ -84,4 +84,4 @@ Then add an `ANTHROPIC_API_KEY` repo secret (Settings → Secrets and variables 
 
 ## Testing
 
-`npm test` runs 125 tests across 15 files (Vitest), covering the parser, graph construction, risk scoring, the fix pipeline, and CLI integration.
+`npm test` runs 129 tests across 14 files (Vitest), covering the parser, graph construction, risk scoring, the fix pipeline, and CLI integration.
