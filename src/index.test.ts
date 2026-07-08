@@ -1,6 +1,8 @@
 // src/index.test.ts
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import path from "node:path";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { runPipeline } from "./index.js";
 
 const REQUIRED_HEADINGS = [
@@ -146,5 +148,48 @@ describe("runPipeline with generatePdf", () => {
 
     expect(result.scope.mode).toBe("cluster-summary");
     expect(result.scope.detailedFiles).toBe(0);
+  });
+
+  // Regression coverage for a real, verified bug: diff-scoping (--topN
+  // combined with filterFiles from --diff) used to restrict which files were
+  // even PARSED, not just which were eligible for detailed review. That
+  // meant a changed file's fan-in silently came out as 0 whenever its real
+  // importers/dependents lived outside the diff -- a file depended on by
+  // many others could score as if nothing used it, purely because of how a
+  // PR happened to be scoped. Reproduced with a real fixture: shared.ts has
+  // a genuine fan-in of 2 (a.ts and c.ts both import it), and a diff that
+  // only touches shared.ts must still see fan-in=2, not 0.
+  it("computes correct fan-in for a diff-scoped file even when its importers are outside the diff", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "archie-diff-fanin-test-"));
+    try {
+      await writeFile(path.join(root, "shared.ts"), "export function shared() { return 1; }");
+      await writeFile(path.join(root, "a.ts"), 'import { shared } from "./shared"; export const a = shared();');
+      await writeFile(path.join(root, "c.ts"), 'import { shared } from "./shared"; export const c = shared();');
+
+      const result = await runPipeline({
+        repoPath: root,
+        topN: 5,
+        maxTokens: 50000,
+        generatePdf: false,
+        filterFiles: [path.join(root, "shared.ts")],
+      });
+
+      // The graph must still be the whole repo -- all 3 files, all 2 real
+      // IMPORTS edges into shared.ts -- even though only shared.ts was
+      // eligible for the top-N detailed review slot.
+      const fileNodes = result.graph.nodes.filter((n) => n.kind === "file");
+      expect(fileNodes).toHaveLength(3);
+
+      const importsToShared = result.graph.edges.filter(
+        (e) => e.type === "IMPORTS" && e.to === "file:shared.ts"
+      );
+      expect(importsToShared).toHaveLength(2);
+
+      // totalFiles in the scope disclosure must reflect the whole repo (3),
+      // not just the 1 file that was in the diff.
+      expect(result.scope.totalFiles).toBe(3);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

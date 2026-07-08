@@ -65,7 +65,7 @@ program
           if (opts.verbose) console.error(`Analyzing ${repoPath}...`);
           const diffScope = resolveDiffScope(resolvedRepo, opts.diff);
           if (diffScope.scoped) {
-            console.error(`[diff] analyzing ${diffScope.changedFileCount} changed files vs ${opts.diff}`);
+            console.error(`[diff] ${diffScope.changedFileCount} changed files vs ${opts.diff} — prioritizing them for detailed review (full repo still parsed for accurate fan-in)`);
           } else if (diffScope.errorMessage) {
             console.error(`[diff] git diff failed: ${diffScope.errorMessage}, running full analysis`);
           } else if (diffScope.requested) {

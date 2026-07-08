@@ -56,6 +56,26 @@ describe("buildContextPack", () => {
     expect(pack.mode).toBe("top-n-detail");
   });
 
+  // Regression coverage: restrictToFileIds (diff-scoping) must only filter
+  // *eligibility* for the top-N slot, not the scores or graph themselves --
+  // a restricted, lower-risk file must still carry its real, full-graph fanIn.
+  it("restrictToFileIds limits which files are eligible for top-N, without changing their scores", () => {
+    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), {
+      topN: 1,
+      maxTokens: 50000,
+      restrictToFileIds: new Set(["file:b.ts"]),
+    });
+
+    // a.ts has the higher risk score (0.9 vs 0.1) and would normally win the
+    // single topN slot -- but it's excluded from the restriction set, so
+    // b.ts (fanIn=1, computed from the full 2-file graph) is selected instead.
+    expect(pack.topRiskFiles).toHaveLength(1);
+    expect(pack.topRiskFiles[0].path).toBe("b.ts");
+    expect(pack.topRiskFiles[0].fanIn).toBe(1);
+    // systemSummary still reflects the whole repo, not just the restricted set.
+    expect(pack.systemSummary.fileCount).toBe(2);
+  });
+
   it("falls back to cluster-summary mode when detail set exceeds token budget", () => {
     const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 1 });
 

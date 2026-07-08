@@ -57,19 +57,19 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     throw new Error(`Path does not exist: ${root}`);
   }
 
-  let files = await walkRepo(root);
+  const files = await walkRepo(root);
   if (files.length === 0) {
     throw new Error(`No parseable TS/JS files found under: ${root}`);
   }
 
-  if (options.filterFiles && options.filterFiles.length > 0) {
-    const filterSet = new Set(options.filterFiles.map((f) => path.resolve(f)));
-    files = files.filter((f) => filterSet.has(path.resolve(f)));
-    if (files.length === 0) {
-      throw new Error(`No parseable files matched the diff filter`);
-    }
-  }
-
+  // filterFiles (from --diff) no longer restricts which files get parsed and
+  // graphed -- it only restricts which files are ELIGIBLE for top-N detailed
+  // review, applied later in buildContextPack. The graph itself is always
+  // built from the whole repo. Found via a real test case: filtering here
+  // meant a changed file's fan-in silently came out as 0 whenever its actual
+  // importers/dependents lived outside the diff, because those other files
+  // were never parsed at all -- a file depended on by 15 others could score
+  // as if nothing used it, purely because of how the PR happened to be scoped.
   const parsedByFile = new Map<string, FileEntry>();
   const complexityByFile = new Map<string, number>();
   const sourceByPath = new Map<string, string>();
@@ -115,11 +115,17 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const dependencies = await loadDependencies(root);
   const graph = buildGraph(parsedByFile, root, aliases);
   const scores = computeRiskScores(graph, complexityByFile);
+
+  const restrictToFileIds =
+    options.filterFiles && options.filterFiles.length > 0
+      ? new Set(options.filterFiles.map((f) => `file:${path.relative(root, path.resolve(f))}`))
+      : undefined;
+
   const pack = buildContextPack(
     graph,
     scores,
     sourceByPath,
-    { topN: options.topN, maxTokens: options.maxTokens },
+    { topN: options.topN, maxTokens: options.maxTokens, restrictToFileIds },
     dependencies
   );
 

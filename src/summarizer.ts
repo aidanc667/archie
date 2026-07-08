@@ -7,6 +7,14 @@ import type { RiskScore } from "./metrics.js";
 export interface ContextPackOptions {
   topN: number;
   maxTokens: number;
+  // When set (diff-scoped runs), only files in this set are eligible for
+  // top-N detailed review -- but this only restricts *selection*. The graph
+  // and risk scores this filters over are always built from the whole repo,
+  // so fan-in and other graph-derived metrics for files in this set stay
+  // accurate. Previously diff-scoping restricted which files were even
+  // parsed, so a changed file's fan-in silently came out as 0 whenever its
+  // real importers/dependents lived outside the diff.
+  restrictToFileIds?: Set<string>;
 }
 
 export interface SystemSummary {
@@ -160,7 +168,10 @@ export function buildContextPack(
   const tested = testedFileIds(graph);
   const exported = exportedNodeIds(graph);
 
-  const sorted = [...scores].sort((a, b) => b.riskScore - a.riskScore);
+  const eligible = options.restrictToFileIds
+    ? scores.filter((s) => options.restrictToFileIds!.has(s.fileId))
+    : scores;
+  const sorted = [...eligible].sort((a, b) => b.riskScore - a.riskScore);
   let topN = sorted.slice(0, options.topN);
 
   // Mode 1: top-N detail, pruning lowest-risk entries until it fits.
