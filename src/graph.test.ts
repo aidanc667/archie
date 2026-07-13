@@ -345,6 +345,29 @@ describe("loadPathAliases", () => {
     });
   });
 
+  // Regression coverage for a string-literal-blind trailing-comma stripper:
+  // the old `replace(/,(\s*[}\]])/g, "$1")` had no awareness of string
+  // boundaries, so a perfectly valid path target that happened to contain a
+  // literal `,}` or `,]` substring (e.g. a glob with an unusual directory
+  // name) had its comma silently eaten, resolving imports to the wrong file.
+  it("does not strip a comma that lives inside a path string value", async () => {
+    await withTempDir(async (dir) => {
+      const jsonc = `{
+        "compilerOptions": {
+          "baseUrl": ".",
+          "paths": {
+            "@/*": ["./src/a,}b/*"],
+          },
+        },
+      }`;
+      await writeFile(path.join(dir, "tsconfig.json"), jsonc, "utf8");
+
+      const aliases = await loadPathAliases(dir);
+      expect(aliases).toHaveLength(1);
+      expect(aliases[0].targets).toEqual([path.resolve(dir, "./src/a,}b/*")]);
+    });
+  });
+
   it("falls back to jsconfig.json when tsconfig.json is absent", async () => {
     await withTempDir(async (dir) => {
       await writeFile(

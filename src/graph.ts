@@ -68,8 +68,51 @@ function stripJsoncComments(raw: string): string {
 // callers treat that the same as "no config present."
 function parseJsonc(raw: string): unknown {
   const withoutComments = stripJsoncComments(raw);
-  const withoutTrailingCommas = withoutComments.replace(/,(\s*[}\]])/g, "$1");
+  const withoutTrailingCommas = stripTrailingCommas(withoutComments);
   return JSON.parse(withoutTrailingCommas);
+}
+
+// Removes trailing commas (`,` before a closing `}`/`]`) that JSON.parse
+// rejects. Like stripJsoncComments, this tracks whether the scanner is inside
+// a string literal — with identical escape-aware logic — so a comma that lives
+// inside a string value (e.g. a path glob like `"./src/a,}b/*"`) is emitted
+// verbatim rather than being mistaken for a trailing comma and eaten. A plain
+// regex gets this wrong: it has no notion of string boundaries.
+function stripTrailingCommas(input: string): string {
+  let result = "";
+  let inString = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (inString) {
+      result += ch;
+      if (ch === "\\" && i + 1 < input.length) {
+        result += input[i + 1];
+        i += 1;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      result += ch;
+      continue;
+    }
+    if (ch === ",") {
+      // Look past any whitespace: if the next non-whitespace char closes an
+      // object/array, this is a trailing comma — drop it and emit the
+      // whitespace + bracket. Otherwise emit the comma as usual.
+      let j = i + 1;
+      while (j < input.length && /\s/.test(input[j])) j += 1;
+      if (j < input.length && (input[j] === "}" || input[j] === "]")) {
+        result += input.slice(i + 1, j + 1);
+        i = j;
+        continue;
+      }
+    }
+    result += ch;
+  }
+  return result;
 }
 
 // Reads `tsconfig.json` (falling back to `jsconfig.json`) from the repo root
