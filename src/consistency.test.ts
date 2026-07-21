@@ -146,6 +146,44 @@ describe("computeNamingConsistency", () => {
     ]);
   });
 
+  it("does not misclassify a leading-underscore private-name marker as snake_case", () => {
+    const graph: CodeGraph = {
+      nodes: [
+        { kind: "file", id: "file:a.ts", path: "a.ts", loc: 10 },
+        { kind: "function", id: "fn:1", name: "doWork", fileId: "file:a.ts", startLine: 1, endLine: 2 },
+        { kind: "function", id: "fn:2", name: "fetchData", fileId: "file:a.ts", startLine: 3, endLine: 4 },
+        { kind: "function", id: "fn:3", name: "_privateHelper", fileId: "file:a.ts", startLine: 5, endLine: 6 },
+      ],
+      edges: [],
+    };
+
+    const report = computeNamingConsistency(graph);
+
+    // `_privateHelper` reads as camelCase once its privacy marker is set
+    // aside -- it should match the group's dominant camelCase style, not be
+    // flagged as a snake_case outlier just because of the leading underscore.
+    expect(report.inconsistencies).toEqual([]);
+  });
+
+  it("classifies a dunder name as ambiguous once its underscore markers are stripped, not SCREAMING_SNAKE_CASE", () => {
+    const graph: CodeGraph = {
+      nodes: [
+        { kind: "file", id: "file:a.py", path: "a.py", loc: 10 },
+        { kind: "function", id: "fn:1", name: "do_work", fileId: "file:a.py", startLine: 1, endLine: 2 },
+        { kind: "function", id: "fn:2", name: "fetch_data", fileId: "file:a.py", startLine: 3, endLine: 4 },
+        { kind: "function", id: "fn:3", name: "__init__", fileId: "file:a.py", startLine: 5, endLine: 6 },
+      ],
+      edges: [],
+    };
+
+    const report = computeNamingConsistency(graph);
+
+    // "__init__" strips to "init" -- a single lowercase word with no
+    // internal signal, so it's ambiguous and compatible with the group's
+    // snake_case dominant style, not flagged.
+    expect(report.inconsistencies).toEqual([]);
+  });
+
   it("returns an empty report for a completely empty graph", () => {
     const graph: CodeGraph = { nodes: [], edges: [] };
 

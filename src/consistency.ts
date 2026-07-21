@@ -52,15 +52,26 @@ type CaseStyle =
 // all-lowercase word, or a single word whose only capital is the first letter,
 // looks identical under either convention, so it's classified "ambiguous"
 // rather than silently assumed to match (or deviate from) the group's style.
+//
+// Leading/trailing underscores are stripped before classifying -- they're a
+// private-name marker (Python's `_private`/`__dunder__`, the same convention
+// in JS/TS), not a snake_case signal by themselves. Without this,
+// `_privateHelper` in an otherwise camelCase file would be misclassified as
+// snake_case purely because of its privacy marker, and `__init__` would read
+// as SCREAMING_SNAKE_CASE instead of the ambiguous single word ("init") it
+// actually is once the markers are set aside.
 function classifyCaseStyle(name: string): CaseStyle {
-  if (name.includes("_")) {
-    const hasLower = /[a-z]/.test(name);
+  const stripped = name.replace(/^_+/, "").replace(/_+$/, "");
+  if (stripped.length === 0) return "ambiguous"; // name was entirely underscores
+
+  if (stripped.includes("_")) {
+    const hasLower = /[a-z]/.test(stripped);
     return hasLower ? "snake_case" : "SCREAMING_SNAKE_CASE";
   }
 
-  const hasInternalCapital = /[A-Z]/.test(name.slice(1));
+  const hasInternalCapital = /[A-Z]/.test(stripped.slice(1));
   if (hasInternalCapital) {
-    return /[A-Z]/.test(name[0] ?? "") ? "PascalCase" : "camelCase";
+    return /[A-Z]/.test(stripped[0] ?? "") ? "PascalCase" : "camelCase";
   }
 
   return "ambiguous";

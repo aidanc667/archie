@@ -81,10 +81,22 @@ in the first place — it is not an affirmative, deliberate check that every nam
 consistent. A compliment about consistency that was never actually verified is a fabrication, not a
 finding.`;
 
+export const TEST_QUALITY_GROUNDING_RULE = `Grounding rule for test quality: each top-risk file's
+\`testCaseCount\` and \`hasTestAssertions\` fields describe its actual linked test file (a real count of
+\`it\`/\`test\`/\`def test_\`/\`func Test\`-style cases found in that test file, and whether it contains any
+assertion calls at all — heuristic checks, not exhaustive, same caveat as \`hasErrorHandling\`). If you cite
+a file's test coverage as thin, superficial, or "just a smoke test," ground that claim in these numbers (e.g.
+"testCaseCount: 1" or "hasTestAssertions: false" for a file whose test exists but asserts nothing) rather than
+a vague impression from the file's \`source\` alone. Do not claim a file's tests are "comprehensive" or
+"thorough" — a count and an assertion-presence boolean cannot establish that; describe what's checkable
+(the count, whether assertions exist) and stop there. If \`hasTests\` is false, \`testCaseCount\` is always 0
+and \`hasTestAssertions\` is always false by definition — this is not itself a separate finding, it's the same
+absence already covered by \`ABSENCE_CLAIM_RULE\`.`;
+
 const SYSTEM_PROMPT = `You are a Staff Engineer writing a formal architecture review for a software engineering team.
 You will be given a Context Pack: a system summary, top-risk files with full source code and metrics
-(complexity, fan-in, LOC, dependency depth, hasTests), a dependency graph snapshot, and optionally
-cluster-level aggregates for large repos.
+(complexity, fan-in, LOC, dependency depth, hasTests, testCaseCount, hasTestAssertions), a dependency graph
+snapshot, and optionally cluster-level aggregates for large repos.
 
 Your job is to write a clear, honest, actionable report that helps the reader understand exactly what
 is risky, why it matters, and precisely what to do about it — in priority order.
@@ -95,6 +107,7 @@ ${ABSENCE_CLAIM_RULE}
 ${DEPENDENCY_GROUNDING_RULE}
 ${EXPORT_GROUNDING_RULE}
 ${NAMING_CONSISTENCY_RULE}
+${TEST_QUALITY_GROUNDING_RULE}
 - Every risk and finding must cite a specific file, function, or metric from the Context Pack.
   Format citations inline as \`filename.ts\` or \`filename.ts → functionName\`. No bare assertions.
 
@@ -711,6 +724,7 @@ ${DEPENDENCY_GROUNDING_RULE}
 ${EXPORT_GROUNDING_RULE}
 ${SCENARIO_GROUNDING_RULE}
 ${NAMING_CONSISTENCY_RULE}
+${TEST_QUALITY_GROUNDING_RULE}
 
 Concretely, check for:
 (a) A version number that doesn't match the Context Pack's \`dependencies\` field.
@@ -722,6 +736,8 @@ Concretely, check for:
 (e) A naming-consistency claim (either citing an inconsistency, or complimenting consistency) that
     isn't backed by a real entry in \`namingConsistency.inconsistencies\` — including a compliment
     about consistent naming when that array is empty.
+(f) A test-quality claim ("comprehensive tests", "just a smoke test", "thin coverage") that isn't
+    backed by that file's actual \`testCaseCount\`/\`hasTestAssertions\` values.
 
 Only flag claims you can concretely trace back to a mismatch or absence in the Context Pack — do not
 flag stylistic issues, subjective judgment calls, or claims you merely find surprising. If you find
