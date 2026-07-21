@@ -15,6 +15,7 @@
 import { readFile } from "node:fs/promises";
 
 const CHECK_NAME = "Archie Architecture Review";
+const SUPPORTED_VERSION = 4;
 
 // Higher rank == more severe. "none" is handled separately as a special case
 // (severity gating disabled) rather than given a rank.
@@ -133,6 +134,12 @@ async function main() {
 
   const raw = await readFile(jsonPath, "utf8");
   const data = JSON.parse(raw);
+
+  if (data.version !== SUPPORTED_VERSION) {
+    throw new Error(
+      `Unsupported Archie JSON output version: ${data.version}. This script expects version ${SUPPORTED_VERSION}. Update scripts/post-check-status.mjs or pin an older Archie release.`
+    );
+  }
 
   const payload = buildCheckRunPayload(data.risks, failOnSeverity, headSha);
 

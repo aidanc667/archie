@@ -155,6 +155,22 @@ export function buildIssueBody(data) {
   return lines.join("\n");
 }
 
+// GitHub's hard limit on an issue body is 65,536 characters. A full-repo
+// report is more likely to approach that than a PR-scoped one (that's the
+// whole point of this feature) -- unlike post-pr-comment.mjs, this can't
+// assume the report stays small. The above-the-fold content (summary,
+// badge, verdict) is what matters most and stays intact; only the bulky
+// collapsed detail gets cut, with an explicit note so a truncated report
+// never reads as a complete one.
+const MAX_ISSUE_BODY_LENGTH = 60_000;
+
+export function truncateIfNeeded(body) {
+  if (body.length <= MAX_ISSUE_BODY_LENGTH) return body;
+  const note =
+    "\n\n_⚠️ This report was truncated because it exceeded GitHub's issue body size limit — see the workflow run logs for the full, untruncated report._";
+  return body.slice(0, MAX_ISSUE_BODY_LENGTH - note.length) + note;
+}
+
 // --- Existing-issue lookup ---------------------------------------------------
 
 // A degenerate state (more than one open issue carrying the label) shouldn't
@@ -233,7 +249,10 @@ async function ensureReportLabelExists(repo, token) {
 async function findOpenReportIssue(repo, token) {
   const searchUrl = `https://api.github.com/repos/${repo}/issues?labels=${LABEL_NAME}&state=open&per_page=100`;
   const issues = await githubRequest(searchUrl, { method: "GET" }, token);
-  return pickReportIssue(issues);
+  // GitHub's issues endpoint returns pull requests too (a PR is an issue
+  // under the hood) -- exclude them so a PR that ever picked up this label
+  // by accident can't have its description silently overwritten.
+  return pickReportIssue(issues.filter((issue) => !issue.pull_request));
 }
 
 async function main() {
@@ -258,7 +277,7 @@ async function main() {
   // (searching by label, attaching it to a freshly-created issue).
   await ensureReportLabelExists(repo, token);
 
-  const body = buildIssueBody(data);
+  const body = truncateIfNeeded(buildIssueBody(data));
   const existing = await findOpenReportIssue(repo, token);
 
   if (existing) {
