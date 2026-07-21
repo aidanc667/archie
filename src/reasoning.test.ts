@@ -43,6 +43,15 @@ describe("validateReportSections", () => {
   });
 });
 
+// Pass 1 now runs TWO forced tool calls in parallel (report_risks and
+// report_scenarios) followed by ONE sequential free-text pass (sections 1,
+// 4, 5). Every generateReport test below needs a fake client that can
+// distinguish which of the three requests it's answering. Dispatching on
+// `tool_choice.name` (rather than positional mockResolvedValueOnce calls)
+// keeps each test's intent isolated: e.g. a test that wants to prove
+// extractRisks fails on a truncated response can leave the scenarios and
+// remaining handlers on their default "success" behavior, so the assertion
+// isn't racing against unrelated failures from the other parallel call.
 const FAKE_RISKS = [
   {
     title: "High coupling in core module",
@@ -52,6 +61,9 @@ const FAKE_RISKS = [
     why_it_matters: "Many dependents will break.",
     root_cause: "fanIn=14 means many files import this module directly.",
     evidence: "fanIn=14",
+    complexity: 42,
+    fanIn: 14,
+    loc: 310,
   },
 ];
 
@@ -67,328 +79,449 @@ const FAKE_RISKS_TOOL_RESPONSE = {
   usage: { input_tokens: 100, output_tokens: 50 },
 };
 
+const FAKE_SCENARIOS = [
+  {
+    title: "Unvalidated webhook payload crashes the ingest worker",
+    trigger: "A third-party webhook sends a payload missing the expected `amount` field.",
+    chain_of_failure:
+      "The ingest worker reads payload.amount without a null check, throws, and the queue retries indefinitely.",
+    business_impact:
+      "Ingest backlog grows unbounded until manual intervention; downstream reports show stale data.",
+    likelihood: "Medium" as const,
+    likelihood_justification:
+      "Depends on how strictly the third party validates its own payloads before sending.",
+  },
+];
+
+const FAKE_SCENARIOS_TOOL_RESPONSE = {
+  content: [
+    {
+      type: "tool_use",
+      id: "tu_2",
+      name: "report_scenarios",
+      input: { scenarios: FAKE_SCENARIOS },
+    },
+  ],
+  usage: { input_tokens: 80, output_tokens: 40 },
+};
+
+const DEFAULT_REMAINING_TEXT = [
+  "## 1. System Summary\ncontent",
+  "## 4. Refactor Plan (step-by-step)\ncontent",
+  "## 5. Senior Engineer Verdict\ncontent",
+].join("\n\n");
+
+const DEFAULT_REMAINING_RESPONSE = {
+  content: [{ type: "text", text: DEFAULT_REMAINING_TEXT }],
+  usage: { input_tokens: 200, output_tokens: 150 },
+};
+
+const FAKE_QUALITY_CHECK_RESPONSE = {
+  content: [
+    {
+      type: "tool_use",
+      id: "tu_3",
+      name: "report_quality_check",
+      input: { warnings: [] },
+    },
+  ],
+  usage: { input_tokens: 60, output_tokens: 20 },
+};
+
+type Responder = () => unknown;
+
+// Builds a fake Anthropic client whose `messages.create` dispatches on the
+// request's `tool_choice.name` to decide whether it's answering the risks
+// call, the scenarios call, the (tool-less) remaining-sections call, or the
+// quality-check call. Each of the four can be overridden independently, and
+// each override may be stateful (e.g. a counter closure that fails once then
+// succeeds) to exercise the retry loop deterministically regardless of the
+// actual resolution order between the two parallel calls.
+function makeFakeClient(overrides: {
+  risks?: Responder;
+  scenarios?: Responder;
+  remaining?: Responder;
+  qualityCheck?: Responder;
+} = {}) {
+  const risksResponder = overrides.risks ?? (() => FAKE_RISKS_TOOL_RESPONSE);
+  const scenariosResponder = overrides.scenarios ?? (() => FAKE_SCENARIOS_TOOL_RESPONSE);
+  const remainingResponder = overrides.remaining ?? (() => DEFAULT_REMAINING_RESPONSE);
+  const qualityCheckResponder = overrides.qualityCheck ?? (() => FAKE_QUALITY_CHECK_RESPONSE);
+
+  const create = vi.fn(async (params: any) => {
+    if (params?.tool_choice?.name === "report_risks") return risksResponder();
+    if (params?.tool_choice?.name === "report_scenarios") return scenariosResponder();
+    if (params?.tool_choice?.name === "report_quality_check") return qualityCheckResponder();
+    return remainingResponder();
+  });
+
+  return { messages: { create } };
+}
+
+const BASE_PACK: ContextPack = {
+  mode: "top-n-detail",
+  systemSummary: { fileCount: 1, totalLoc: 10 },
+  topRiskFiles: [],
+  graphSnapshot: [],
+  clusters: [],
+};
+
 describe("generateReport", () => {
-  it("calls the Claude client twice and returns assembled report with all sections", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
+  it("calls the Claude client four times (risks + scenarios in parallel, then remaining sections, then the quality check) and returns assembled report with all sections", async () => {
+    const fakeClient = makeFakeClient();
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
-
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    const { report: result, usage } = await generateReport(fakeClient as any, pack);
+    const { report: result, risks, scenarios, qualityWarnings, usage } = await generateReport(
+      fakeClient as any,
+      BASE_PACK
+    );
     expect(result).toContain("1. System Summary");
     expect(result).toContain("2. Top 5 Architectural Risks");
     expect(result).toContain("**Severity:** High");
     expect(result).toContain("**Root cause:**");
+    expect(result).toContain("*Metrics: complexity=42, fanIn=14, loc=310*");
     expect(result).toContain("3. Production Failure Scenarios");
+    expect(result).toContain("### Scenario 1:");
+    expect(result).toContain("**Trigger:**");
+    expect(result).toContain("**Chain of failure:**");
+    expect(result).toContain("**Business impact:**");
+    expect(result).toContain("**Likelihood:** Medium —");
     expect(result).toContain("4. Refactor Plan (step-by-step)");
     expect(result).toContain("5. Senior Engineer Verdict");
-    expect(fakeClient.messages.create).toHaveBeenCalledTimes(2);
-    expect(usage).toEqual({ inputTokens: 300, outputTokens: 200 });
+    // No warnings from the default fake quality-check response, so no
+    // caveat block should be appended.
+    expect(result).not.toContain("Automated grounding check");
+
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(4);
+    expect(risks).toEqual(FAKE_RISKS);
+    expect(scenarios).toEqual(FAKE_SCENARIOS);
+    expect(qualityWarnings).toEqual([]);
+    expect(usage).toEqual({
+      inputTokens: 100 + 80 + 200 + 60,
+      outputTokens: 50 + 40 + 150 + 20,
+    });
+  });
+
+  it("issues the risks and scenarios requests before the remaining-sections request, and the quality check after that (parallel pass 1, sequential passes 2 and 4)", async () => {
+    const fakeClient = makeFakeClient();
+
+    await generateReport(fakeClient as any, BASE_PACK);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    expect(calls).toHaveLength(4);
+    expect(calls[0][0].tool_choice).toEqual({ type: "tool", name: "report_risks" });
+    expect(calls[1][0].tool_choice).toEqual({ type: "tool", name: "report_scenarios" });
+    expect(calls[2][0].tool_choice).toBeUndefined();
+    expect(calls[3][0].tool_choice).toEqual({ type: "tool", name: "report_quality_check" });
   });
 
   // Regression test: the same repo (same context pack) produced different
   // "Top 5 Architectural Risks" selections between a local CLI run and a
   // GitHub Actions run, because neither Claude call set a temperature,
-  // defaulting to the API's maximum-variance setting. This pins both calls
-  // to temperature 0 so the same input reliably produces the same output
-  // regardless of which environment ran it.
-  it("calls both passes with temperature 0 for reproducible output", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
+  // defaulting to the API's maximum-variance setting. This pins all four
+  // calls to temperature 0 so the same input reliably produces the same
+  // output regardless of which environment ran it.
+  it("calls all four passes with temperature 0 for reproducible output", async () => {
+    const fakeClient = makeFakeClient();
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
-
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    await generateReport(fakeClient as any, pack);
+    await generateReport(fakeClient as any, BASE_PACK);
 
     const calls = fakeClient.messages.create.mock.calls;
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(4);
     expect(calls[0][0]).toMatchObject({ temperature: 0 });
     expect(calls[1][0]).toMatchObject({ temperature: 0 });
+    expect(calls[2][0]).toMatchObject({ temperature: 0 });
+    expect(calls[3][0]).toMatchObject({ temperature: 0 });
   });
 
   // Regression coverage found via Archie's own self-analysis: section
   // assembly previously required an exact literal "## 3." match and fell
-  // back to splitting on that same literal string otherwise -- which broke
-  // on minor heading formatting variation and could duplicate content if
-  // "## 3." appeared more than once. This pins tolerance for exactly that
-  // kind of variation (extra whitespace, different capitalisation).
-  it("assembles the report correctly even when heading 3 has different casing and extra whitespace", async () => {
+  // back to splitting on that same literal string if the model varied
+  // heading formatting even slightly -- which broke on minor formatting
+  // variation and could duplicate content if the literal string appeared
+  // more than once. Section 3 is now sourced entirely from the structured
+  // report_scenarios tool call, so the splice boundary this test pins is
+  // now the start of "## 4." in the remaining (pass 2) text.
+  it("assembles the report correctly even when heading 4 has different casing and extra whitespace", async () => {
     const remainingText = [
       "## 1. System Summary\ncontent",
-      "##  3. PRODUCTION FAILURE SCENARIOS\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "##  4. REFACTOR PLAN (STEP-BY-STEP)\ncontent",
       "## 5. Senior Engineer Verdict\ncontent",
     ].join("\n\n");
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
+    const fakeClient = makeFakeClient({
+      remaining: () => ({
+        content: [{ type: "text", text: remainingText }],
+        usage: { input_tokens: 200, output_tokens: 150 },
+      }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    const { report } = await generateReport(fakeClient as any, pack);
+    const { report } = await generateReport(fakeClient as any, BASE_PACK);
     expect(report).toContain("1. System Summary");
     expect(report).toContain("2. Top 5 Architectural Risks");
-    expect(report).toContain("PRODUCTION FAILURE SCENARIOS");
-    expect(report).toContain("4. Refactor Plan (step-by-step)");
+    expect(report).toContain("3. Production Failure Scenarios");
+    expect(report).toContain("REFACTOR PLAN (STEP-BY-STEP)");
     expect(report).toContain("5. Senior Engineer Verdict");
   });
 
-  it("does not duplicate content when a heading-3-like string appears earlier in section 1 (e.g. inside a quoted example)", async () => {
+  it("does not duplicate content when a heading-4-like string appears earlier in section 1 (e.g. inside a quoted example)", async () => {
     const remainingText = [
-      "## 1. System Summary\nThis codebase used to split reports on the literal string \"## 3.\" which was fragile.",
-      "## 3. Production Failure Scenarios\nreal content",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
+      "## 1. System Summary\nThis codebase used to split reports on the literal string \"## 4.\" which was fragile.",
+      "## 4. Refactor Plan (step-by-step)\nreal content",
       "## 5. Senior Engineer Verdict\ncontent",
     ].join("\n\n");
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
+    const fakeClient = makeFakeClient({
+      remaining: () => ({
+        content: [{ type: "text", text: remainingText }],
+        usage: { input_tokens: 200, output_tokens: 150 },
+      }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    const { report } = await generateReport(fakeClient as any, pack);
+    const { report } = await generateReport(fakeClient as any, BASE_PACK);
     // The quoted mention in section 1 should appear exactly once, not
     // duplicated by an over-eager literal-string split.
-    const occurrences = report.split('"## 3."').length - 1;
+    const occurrences = report.split('"## 4."').length - 1;
     expect(occurrences).toBe(1);
     expect(report).toContain("real content");
   });
 
-  it("throws when pass 1 does not return a tool_use block", async () => {
-    const fakeClient = {
-      messages: {
-        create: vi.fn().mockResolvedValue({
-          content: [{ type: "text", text: "incomplete response" }],
-        }),
-      },
-    };
+  it("throws when pass 1's risks call does not return a tool_use block", async () => {
+    const fakeClient = makeFakeClient({
+      risks: () => ({ content: [{ type: "text", text: "incomplete response" }] }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
       /report_risks tool/
     );
   });
 
-  it("throws a clear error when pass 1's response was truncated (stop_reason: max_tokens)", async () => {
-    const fakeClient = {
-      messages: {
-        create: vi.fn().mockResolvedValue({
-          ...FAKE_RISKS_TOOL_RESPONSE,
-          stop_reason: "max_tokens",
-        }),
-      },
-    };
+  it("throws when pass 1's scenarios call does not return a tool_use block", async () => {
+    const fakeClient = makeFakeClient({
+      scenarios: () => ({ content: [{ type: "text", text: "incomplete response" }] }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(/truncated/i);
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
+      /report_scenarios tool/
+    );
   });
 
-  it("throws a clear error instead of silently producing undefined-field risks when the tool call's risks field is not an array", async () => {
+  it("throws a clear error when the risks call's response was truncated (stop_reason: max_tokens)", async () => {
+    const fakeClient = makeFakeClient({
+      risks: () => ({ ...FAKE_RISKS_TOOL_RESPONSE, stop_reason: "max_tokens" }),
+    });
+
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(/truncated/i);
+    // 3 retry attempts for the risks call + 1 successful scenarios call.
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(4);
+  });
+
+  it("throws a clear error when the scenarios call's response was truncated (stop_reason: max_tokens)", async () => {
+    const fakeClient = makeFakeClient({
+      scenarios: () => ({ ...FAKE_SCENARIOS_TOOL_RESPONSE, stop_reason: "max_tokens" }),
+    });
+
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(/truncated/i);
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(4);
+  });
+
+  it("throws a clear error instead of silently producing undefined-field risks when the risks tool call's risks field is not an array", async () => {
     // Regression test: a malformed (e.g. truncated) tool response can return
     // `risks` as something other than a well-formed array. Previously this
     // silently produced a report with thousands of "Risk N: undefined —
     // `undefined`" entries instead of failing loudly.
-    const fakeClient = {
-      messages: {
-        create: vi.fn().mockResolvedValue({
-          content: [
-            {
-              type: "tool_use",
-              id: "tu_1",
-              name: "report_risks",
-              input: { risks: "not an array, e.g. truncated raw JSON text" },
-            },
-          ],
-          usage: { input_tokens: 100, output_tokens: 50 },
-        }),
-      },
-    };
+    const fakeClient = makeFakeClient({
+      risks: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_1",
+            name: "report_risks",
+            input: { risks: "not an array, e.g. truncated raw JSON text" },
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
       /malformed.*risks.*field/i
     );
   });
 
-  it("throws a clear error when a risk object is missing a required field", async () => {
-    const fakeClient = {
-      messages: {
-        create: vi.fn().mockResolvedValue({
-          content: [
-            {
-              type: "tool_use",
-              id: "tu_1",
-              name: "report_risks",
-              input: { risks: [{ title: "Missing fields", file: "src/x.ts" }] },
-            },
-          ],
-          usage: { input_tokens: 100, output_tokens: 50 },
-        }),
-      },
-    };
+  it("throws a clear error instead of silently producing undefined-field scenarios when the scenarios tool call's scenarios field is not an array", async () => {
+    const fakeClient = makeFakeClient({
+      scenarios: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_2",
+            name: "report_scenarios",
+            input: { scenarios: "not an array, e.g. truncated raw JSON text" },
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(/malformed risk at index 0/i);
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
+      /malformed.*scenarios.*field/i
+    );
   });
 
-  it("retries pass 1 after a truncated response and succeeds on a later attempt", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
+  it("throws a clear error when a risk object is missing a required field", async () => {
+    const fakeClient = makeFakeClient({
+      risks: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_1",
+            name: "report_risks",
+            input: { risks: [{ title: "Missing fields", file: "src/x.ts" }] },
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
 
-    const truncatedResponse = { ...FAKE_RISKS_TOOL_RESPONSE, stop_reason: "max_tokens" };
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
+      /malformed risk at index 0/i
+    );
+  });
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(truncatedResponse) // attempt 1: truncated
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE) // attempt 2: succeeds
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
+  it("throws a clear error when a scenario object is missing a required field", async () => {
+    const fakeClient = makeFakeClient({
+      scenarios: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_2",
+            name: "report_scenarios",
+            input: { scenarios: [{ title: "Missing fields" }] },
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
+
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
+      /malformed scenario at index 0/i
+    );
+  });
+
+  it("throws a clear error when a scenario's likelihood is not one of High/Medium/Low", async () => {
+    const badScenario = { ...FAKE_SCENARIOS[0], likelihood: "Severe" };
+    const fakeClient = makeFakeClient({
+      scenarios: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_2",
+            name: "report_scenarios",
+            input: { scenarios: [badScenario] },
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
+
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
+      /malformed scenario at index 0/i
+    );
+  });
+
+  it("throws a clear error when a risk's complexity/fanIn/loc field is missing", async () => {
+    const { complexity, ...riskWithoutComplexity } = FAKE_RISKS[0];
+    const fakeClient = makeFakeClient({
+      risks: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_1",
+            name: "report_risks",
+            input: { risks: [riskWithoutComplexity] },
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
+
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
+      /malformed risk at index 0.*"complexity"/i
+    );
+  });
+
+  it("throws a clear error when a risk's numeric field is the wrong type (e.g. a string instead of a number)", async () => {
+    const riskWithStringComplexity = { ...FAKE_RISKS[0], complexity: "42" };
+    const fakeClient = makeFakeClient({
+      risks: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_1",
+            name: "report_risks",
+            input: { risks: [riskWithStringComplexity] },
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
+
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
+      /malformed risk at index 0.*"complexity"/i
+    );
+  });
+
+  it("retries the risks extraction after a truncated response and succeeds on a later attempt", async () => {
+    let riskAttempts = 0;
+    const fakeClient = makeFakeClient({
+      risks: () => {
+        riskAttempts += 1;
+        if (riskAttempts === 1) {
+          return { ...FAKE_RISKS_TOOL_RESPONSE, stop_reason: "max_tokens" };
+        }
+        return FAKE_RISKS_TOOL_RESPONSE;
       },
-    };
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    const { report } = await generateReport(fakeClient as any, pack);
+    const { report } = await generateReport(fakeClient as any, BASE_PACK);
     expect(report).toContain("**Severity:** High");
-    expect(fakeClient.messages.create).toHaveBeenCalledTimes(3); // 2 pass-1 attempts + 1 pass-2 call
+    expect(riskAttempts).toBe(2);
+    // 2 risks attempts + 1 scenarios call + 1 remaining call + 1 quality check call.
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(5);
+  });
+
+  it("retries the scenarios extraction after a truncated response and succeeds on a later attempt", async () => {
+    let scenarioAttempts = 0;
+    const fakeClient = makeFakeClient({
+      scenarios: () => {
+        scenarioAttempts += 1;
+        if (scenarioAttempts === 1) {
+          return { ...FAKE_SCENARIOS_TOOL_RESPONSE, stop_reason: "max_tokens" };
+        }
+        return FAKE_SCENARIOS_TOOL_RESPONSE;
+      },
+    });
+
+    const { report } = await generateReport(fakeClient as any, BASE_PACK);
+    expect(report).toContain("### Scenario 1:");
+    expect(scenarioAttempts).toBe(2);
+    // 1 risks call + 2 scenarios attempts + 1 remaining call + 1 quality check call.
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(5);
   });
 
   it("does not retry a non-retryable error (e.g. no tool_use block at all)", async () => {
-    const fakeClient = {
-      messages: {
-        create: vi.fn().mockResolvedValue({
-          content: [{ type: "text", text: "incomplete response" }],
-          usage: { input_tokens: 100, output_tokens: 50 },
-        }),
-      },
-    };
+    const fakeClient = makeFakeClient({
+      risks: () => ({
+        content: [{ type: "text", text: "incomplete response" }],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(/report_risks tool/);
-    expect(fakeClient.messages.create).toHaveBeenCalledTimes(1); // failed fast, no retries
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
+      /report_risks tool/
+    );
+    // Risks call failed fast (no retries) + the scenarios call still ran in parallel.
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(2);
   });
 
   it("caps the rendered risks section at 5, even if the model returns more", async () => {
@@ -400,75 +533,35 @@ describe("generateReport", () => {
       why_it_matters: "matters",
       root_cause: "cause",
       evidence: "evidence",
+      complexity: 10 + i,
+      fanIn: i,
+      loc: 100 + i * 10,
     }));
 
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
+    const fakeClient = makeFakeClient({
+      risks: () => ({
+        content: [
+          { type: "tool_use", id: "tu_1", name: "report_risks", input: { risks: manyRisks } },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce({
-            content: [
-              { type: "tool_use", id: "tu_1", name: "report_risks", input: { risks: manyRisks } },
-            ],
-            usage: { input_tokens: 100, output_tokens: 50 },
-          })
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
-
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    const { report } = await generateReport(fakeClient as any, pack);
+    const { report } = await generateReport(fakeClient as any, BASE_PACK);
     expect(report.match(/^### Risk \d+:/gm)).toHaveLength(5);
   });
 
   it("throws when the assembled report is missing required sections", async () => {
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({ content: [{ type: "text", text: "incomplete" }] }),
-      },
-    };
+    const fakeClient = makeFakeClient({
+      remaining: () => ({ content: [{ type: "text", text: "incomplete" }] }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    await expect(generateReport(fakeClient as any, pack)).rejects.toThrow(
+    await expect(generateReport(fakeClient as any, BASE_PACK)).rejects.toThrow(
       /missing required sections/
     );
   });
 
   it("sorts risks by severity (Critical, then High, then Medium) regardless of input order", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
-
     const unsortedRisks = [
       {
         title: "Medium severity issue",
@@ -478,6 +571,9 @@ describe("generateReport", () => {
         why_it_matters: "Some impact.",
         root_cause: "Some cause.",
         evidence: "Some evidence.",
+        complexity: 5,
+        fanIn: 1,
+        loc: 50,
       },
       {
         title: "Critical severity issue",
@@ -487,6 +583,9 @@ describe("generateReport", () => {
         why_it_matters: "Severe impact.",
         root_cause: "Severe cause.",
         evidence: "Severe evidence.",
+        complexity: 30,
+        fanIn: 20,
+        loc: 500,
       },
       {
         title: "High severity issue",
@@ -496,40 +595,27 @@ describe("generateReport", () => {
         why_it_matters: "Notable impact.",
         root_cause: "Notable cause.",
         evidence: "Notable evidence.",
+        complexity: 15,
+        fanIn: 8,
+        loc: 200,
       },
     ];
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce({
-            content: [
-              {
-                type: "tool_use",
-                id: "tu_1",
-                name: "report_risks",
-                input: { risks: unsortedRisks },
-              },
-            ],
-            usage: { input_tokens: 100, output_tokens: 50 },
-          })
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
+    const fakeClient = makeFakeClient({
+      risks: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_1",
+            name: "report_risks",
+            input: { risks: unsortedRisks },
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    const { report: result } = await generateReport(fakeClient as any, pack);
+    const { report: result } = await generateReport(fakeClient as any, BASE_PACK);
     const criticalIndex = result.indexOf("Critical severity issue");
     const highIndex = result.indexOf("High severity issue");
     const mediumIndex = result.indexOf("Medium severity issue");
@@ -542,13 +628,6 @@ describe("generateReport", () => {
   });
 
   it("appends a confidence caveat for low/medium confidence risks but not high confidence risks", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
-
     const risks = [
       {
         title: "Low confidence issue",
@@ -558,6 +637,9 @@ describe("generateReport", () => {
         why_it_matters: "Some impact.",
         root_cause: "Some cause.",
         evidence: "Some evidence.",
+        complexity: 5,
+        fanIn: 1,
+        loc: 50,
       },
       {
         title: "High confidence issue",
@@ -567,40 +649,27 @@ describe("generateReport", () => {
         why_it_matters: "Notable impact.",
         root_cause: "Notable cause.",
         evidence: "Notable evidence.",
+        complexity: 15,
+        fanIn: 8,
+        loc: 200,
       },
     ];
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce({
-            content: [
-              {
-                type: "tool_use",
-                id: "tu_1",
-                name: "report_risks",
-                input: { risks },
-              },
-            ],
-            usage: { input_tokens: 100, output_tokens: 50 },
-          })
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
+    const fakeClient = makeFakeClient({
+      risks: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_1",
+            name: "report_risks",
+            input: { risks },
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      }),
+    });
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    const { report: result } = await generateReport(fakeClient as any, pack);
+    const { report: result } = await generateReport(fakeClient as any, BASE_PACK);
     expect(result).toContain(
       "*Confidence: based on graph structure and metrics only — full source wasn't available to verify this finding directly.*"
     );
@@ -615,24 +684,7 @@ describe("generateReport", () => {
   });
 
   it("includes a scope statement with partial-coverage wording for a top-n-detail pack with unassessed files", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
-
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
+    const fakeClient = makeFakeClient();
 
     const pack: ContextPack = {
       mode: "top-n-detail",
@@ -683,24 +735,7 @@ describe("generateReport", () => {
   });
 
   it("includes cluster-specific scope wording for a cluster-summary pack", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
-
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
+    const fakeClient = makeFakeClient();
 
     const pack: ContextPack = {
       mode: "cluster-summary",
@@ -716,24 +751,7 @@ describe("generateReport", () => {
   });
 
   it("uses 'all N files' wording when every file was analyzed in detail", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
-
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
+    const fakeClient = makeFakeClient();
 
     const pack: ContextPack = {
       mode: "top-n-detail",
@@ -772,6 +790,205 @@ describe("generateReport", () => {
   });
 });
 
+describe("generateReport quality check (pass 4)", () => {
+  it("appends no caveat block when the quality check returns an empty warnings array", async () => {
+    const fakeClient = makeFakeClient({
+      qualityCheck: () => ({
+        content: [
+          { type: "tool_use", id: "tu_3", name: "report_quality_check", input: { warnings: [] } },
+        ],
+        usage: { input_tokens: 60, output_tokens: 20 },
+      }),
+    });
+
+    const { report, qualityWarnings } = await generateReport(fakeClient as any, BASE_PACK);
+    expect(qualityWarnings).toEqual([]);
+    expect(report).not.toContain("Automated grounding check");
+    expect(report).not.toContain("⚠️");
+    expect(fakeClient.messages.create).toHaveBeenCalledTimes(4);
+  });
+
+  it("passes the assembled Section 1/4/5 text and the Context Pack to the quality-check call, forcing the report_quality_check tool", async () => {
+    const fakeClient = makeFakeClient();
+
+    await generateReport(fakeClient as any, BASE_PACK);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    const qualityCall = calls[3][0];
+    expect(qualityCall.tool_choice).toEqual({ type: "tool", name: "report_quality_check" });
+    expect(qualityCall.tools).toHaveLength(1);
+    expect(qualityCall.tools[0].name).toBe("report_quality_check");
+    expect(qualityCall.messages[0].content).toContain(DEFAULT_REMAINING_TEXT);
+  });
+
+  it("appends a correctly formatted caveat block right after the scope statement, before the risks section, when the quality check finds real issues", async () => {
+    const fakeClient = makeFakeClient({
+      qualityCheck: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_3",
+            name: "report_quality_check",
+            input: {
+              warnings: [
+                {
+                  section: "1. System Summary",
+                  claim: "Next.js 15",
+                  issue: "dependencies field shows 16.2.2, not 15",
+                },
+                {
+                  section: "5. Senior Engineer Verdict",
+                  claim: "the exported `foo` function",
+                  issue: "`foo` is not in exportedSymbols for this file",
+                },
+              ],
+            },
+          },
+        ],
+        usage: { input_tokens: 60, output_tokens: 20 },
+      }),
+    });
+
+    const { report, qualityWarnings } = await generateReport(fakeClient as any, BASE_PACK);
+    expect(qualityWarnings).toHaveLength(2);
+    expect(report).toContain(
+      "> ⚠️ **Automated grounding check flagged 2 potential issue(s) in this report:**"
+    );
+    expect(report).toContain(
+      '> - [Section 1. System Summary] "Next.js 15" — dependencies field shows 16.2.2, not 15'
+    );
+    expect(report).toContain(
+      '> - [Section 5. Senior Engineer Verdict] "the exported `foo` function" — `foo` is not in exportedSymbols for this file'
+    );
+
+    // Positioning: the caveat block must land after the scope statement and
+    // before the risks section.
+    const scopeIndex = report.indexOf("**Scope of this analysis:**");
+    const caveatIndex = report.indexOf("Automated grounding check");
+    const risksIndex = report.indexOf("## 2. Top 5 Architectural Risks");
+    expect(scopeIndex).toBeGreaterThan(-1);
+    expect(caveatIndex).toBeGreaterThan(scopeIndex);
+    expect(risksIndex).toBeGreaterThan(caveatIndex);
+  });
+
+  it("fails open with an empty warnings array (rather than propagating a throw) when the warnings field is not an array", async () => {
+    const fakeClient = makeFakeClient({
+      qualityCheck: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_3",
+            name: "report_quality_check",
+            input: { warnings: "not an array, e.g. truncated raw JSON text" },
+          },
+        ],
+        usage: { input_tokens: 60, output_tokens: 20 },
+      }),
+    });
+
+    // Structurally malformed, not merely empty -- this pass still fails open
+    // rather than throwing out of generateReport (see resilience test below),
+    // so the report succeeds with qualityWarnings === [] rather than
+    // rejecting.
+    const { qualityWarnings } = await generateReport(fakeClient as any, BASE_PACK);
+    expect(qualityWarnings).toEqual([]);
+  });
+
+  it("fails open with an empty warnings array when a warning entry is not an object (retries exhausted, non-throwing)", async () => {
+    let attempts = 0;
+    const fakeClient = makeFakeClient({
+      qualityCheck: () => {
+        attempts += 1;
+        return {
+          content: [
+            {
+              type: "tool_use",
+              id: "tu_3",
+              name: "report_quality_check",
+              input: { warnings: ["not an object"] },
+            },
+          ],
+          usage: { input_tokens: 60, output_tokens: 20 },
+        };
+      },
+    });
+
+    const { qualityWarnings } = await generateReport(fakeClient as any, BASE_PACK);
+    // validateQualityWarnings rejects this every attempt, but the error is
+    // non-retryable (doesn't match /truncated|malformed/... wait it does
+    // match "malformed"), so it retries MAX_RISK_EXTRACTION_ATTEMPTS times,
+    // then fails open.
+    expect(attempts).toBe(3);
+    expect(qualityWarnings).toEqual([]);
+  });
+
+  it("fails open with an empty warnings array when a warning is missing a required field (retries exhausted, non-throwing)", async () => {
+    const fakeClient = makeFakeClient({
+      qualityCheck: () => ({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_3",
+            name: "report_quality_check",
+            input: { warnings: [{ section: "1. System Summary", claim: "" }] },
+          },
+        ],
+        usage: { input_tokens: 60, output_tokens: 20 },
+      }),
+    });
+
+    const { qualityWarnings } = await generateReport(fakeClient as any, BASE_PACK);
+    expect(qualityWarnings).toEqual([]);
+  });
+
+  it("does not throw or abort the report when the quality check pass fails after all retries -- it fails open with an empty warnings array", async () => {
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fakeClient = makeFakeClient({
+        qualityCheck: () => ({
+          content: [{ type: "text", text: "no tool_use here" }],
+          usage: { input_tokens: 60, output_tokens: 20 },
+        }),
+      });
+
+      const { report, risks, scenarios, qualityWarnings } = await generateReport(
+        fakeClient as any,
+        BASE_PACK
+      );
+
+      // The report itself must still succeed, with all its other content intact.
+      expect(report).toContain("1. System Summary");
+      expect(report).toContain("2. Top 5 Architectural Risks");
+      expect(risks).toEqual(FAKE_RISKS);
+      expect(scenarios).toEqual(FAKE_SCENARIOS);
+      expect(qualityWarnings).toEqual([]);
+      expect(report).not.toContain("Automated grounding check");
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[archie]")
+      );
+    } finally {
+      consoleWarnSpy.mockRestore();
+    }
+  });
+
+  it("retries the quality check after a truncated response and succeeds on a later attempt", async () => {
+    let qualityAttempts = 0;
+    const fakeClient = makeFakeClient({
+      qualityCheck: () => {
+        qualityAttempts += 1;
+        if (qualityAttempts === 1) {
+          return { ...FAKE_QUALITY_CHECK_RESPONSE, stop_reason: "max_tokens" };
+        }
+        return FAKE_QUALITY_CHECK_RESPONSE;
+      },
+    });
+
+    const { qualityWarnings } = await generateReport(fakeClient as any, BASE_PACK);
+    expect(qualityWarnings).toEqual([]);
+    expect(qualityAttempts).toBe(2);
+  });
+});
+
 describe("ABSENCE_CLAIM_RULE", () => {
   it("explicitly forbids claiming a file lacks tests unless hasTests is present and false", () => {
     expect(ABSENCE_CLAIM_RULE).toMatch(/hasTests/);
@@ -788,6 +1005,15 @@ describe("SCENARIO_GROUNDING_RULE", () => {
     expect(SCENARIO_GROUNDING_RULE).toMatch(/graphSnapshot/);
     expect(SCENARIO_GROUNDING_RULE.toLowerCase()).toMatch(/conditionally/);
   });
+
+  it("is included in the system prompt sent to Claude for the scenarios extraction call", async () => {
+    const fakeClient = makeFakeClient();
+
+    await generateReport(fakeClient as any, BASE_PACK);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    expect(calls[1][0].system).toContain("do NOT assert that a specific untrusted");
+  });
 });
 
 // Regression coverage for a bug found on a real report: the System Summary
@@ -801,43 +1027,27 @@ describe("DEPENDENCY_GROUNDING_RULE", () => {
     expect(DEPENDENCY_GROUNDING_RULE.toLowerCase()).toMatch(/do not guess or infer/);
   });
 
-  it("is included in the system prompt sent to Claude for both passes", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
-
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
+  it("is included in the system prompt sent to Claude for all three passes", async () => {
+    const fakeClient = makeFakeClient();
 
     const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
+      ...BASE_PACK,
       dependencies: { next: "16.2.2" },
     };
 
     await generateReport(fakeClient as any, pack);
 
     const calls = fakeClient.messages.create.mock.calls;
+    expect(calls).toHaveLength(4);
     expect(calls[0][0].system).toContain("Do not guess or infer");
     expect(calls[1][0].system).toContain("Do not guess or infer");
-    // The dependencies map itself is serialized into pass 1's user message
-    // (the Context Pack JSON), so the actual version string reaches the model.
+    expect(calls[2][0].system).toContain("Do not guess or infer");
+    expect(calls[3][0].system).toContain("Do not guess or infer");
+    // The dependencies map itself is serialized into both pass-1 user
+    // messages (the Context Pack JSON), so the actual version string
+    // reaches the model for both the risks and scenarios calls.
     expect(calls[0][0].messages[0].content).toContain("16.2.2");
+    expect(calls[1][0].messages[0].content).toContain("16.2.2");
   });
 });
 
@@ -852,39 +1062,16 @@ describe("EXPORT_GROUNDING_RULE", () => {
     expect(EXPORT_GROUNDING_RULE.toLowerCase()).toMatch(/private, module-internal/);
   });
 
-  it("is included in the system prompt sent to Claude for both passes", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
+  it("is included in the system prompt sent to Claude for all three passes", async () => {
+    const fakeClient = makeFakeClient();
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
-
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    await generateReport(fakeClient as any, pack);
+    await generateReport(fakeClient as any, BASE_PACK);
 
     const calls = fakeClient.messages.create.mock.calls;
     expect(calls[0][0].system).toContain("private, module-internal");
     expect(calls[1][0].system).toContain("private, module-internal");
+    expect(calls[2][0].system).toContain("private, module-internal");
+    expect(calls[3][0].system).toContain("private, module-internal");
   });
 });
 
@@ -896,38 +1083,16 @@ describe("EXPORT_GROUNDING_RULE", () => {
 // component already exists.
 describe("cross-cutting-concern reuse instruction", () => {
   it("instructs refactor steps to search for an existing implementation before building a new component for a cross-cutting concern", async () => {
-    const remainingText = [
-      "## 1. System Summary\ncontent",
-      "## 3. Production Failure Scenarios\ncontent",
-      "## 4. Refactor Plan (step-by-step)\ncontent",
-      "## 5. Senior Engineer Verdict\ncontent",
-    ].join("\n\n");
+    const fakeClient = makeFakeClient();
 
-    const fakeClient = {
-      messages: {
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(FAKE_RISKS_TOOL_RESPONSE)
-          .mockResolvedValueOnce({
-            content: [{ type: "text", text: remainingText }],
-            usage: { input_tokens: 200, output_tokens: 150 },
-          }),
-      },
-    };
+    await generateReport(fakeClient as any, BASE_PACK);
 
-    const pack: ContextPack = {
-      mode: "top-n-detail",
-      systemSummary: { fileCount: 1, totalLoc: 10 },
-      topRiskFiles: [],
-      graphSnapshot: [],
-      clusters: [],
-    };
-
-    await generateReport(fakeClient as any, pack);
-
+    // The refactor plan (section 4) is written by the remaining-sections
+    // call, which is now the third call (index 2) since sections 2 and 3
+    // are each generated by their own structured tool call ahead of it.
     const calls = fakeClient.messages.create.mock.calls;
-    expect(calls[1][0].system.toLowerCase()).toMatch(/error boundary/);
-    expect(calls[1][0].system.toLowerCase()).toMatch(/search the codebase for an existing implementation/);
+    expect(calls[2][0].system.toLowerCase()).toMatch(/error boundary/);
+    expect(calls[2][0].system.toLowerCase()).toMatch(/search the codebase for an existing implementation/);
   });
 });
 

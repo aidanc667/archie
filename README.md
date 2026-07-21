@@ -82,6 +82,76 @@ Then add an `ANTHROPIC_API_KEY` repo secret (Settings → Secrets and variables 
 
 `aidanc667/archie@v1` is a composite Action (see [`action.yml`](action.yml)) — it checks out and builds Archie fresh on every run and posts the PR comment itself, so this is the entire setup; no manual multi-step workflow to copy. `top-n` is also configurable (`with: { top-n: '15' }`) if you want more files reviewed in detail per run.
 
+## Triggering fixes from a PR comment (`/archie fix`)
+
+Beyond the review comment, Archie can also apply its own suggested refactor
+steps. Commenting `/archie fix` on a pull request runs the full pipeline
+non-interactively: it re-analyzes the PR, hands each Refactor Plan step to a
+headless Claude Code agent, keeps only the steps whose build/test pass, and
+proposes the result as a **brand new pull request** targeting the same
+branch you're already reviewing — never `main`, and never a direct push to
+your PR branch.
+
+### What it does and doesn't do
+
+- **Does:** analyze the PR, run each refactor step through an isolated
+  agent, verify build/test after each step, and — if anything was kept —
+  open a second PR (`archie-fix/pr-<n>-<timestamp>` → your PR's branch) with
+  a comment linking back to it from the original PR.
+- **Does not:** push directly to your PR's branch, touch the default
+  branch, or merge anything automatically. The fix PR is a normal proposal;
+  merging (or closing) it is a normal human review decision like any other
+  PR.
+- If the agent made no changes worth keeping, it says so in the logs and
+  exits cleanly — no PR is opened.
+
+### Who can trigger it
+
+Only commenters GitHub itself classifies as `OWNER`, `MEMBER`, or
+`COLLABORATOR` on the repository can trigger a run — a comment from a fork
+PR's author doesn't qualify unless they separately hold one of those roles.
+This is enforced in the workflow's `if:` condition, not by convention.
+
+### Setup for your own repo
+
+1. Add a workflow file at `.github/workflows/archie-fix-command.yml`:
+
+   ```yaml
+   name: Archie Fix Command
+
+   on:
+     issue_comment:
+       types: [created]
+
+   permissions:
+     contents: write
+     pull-requests: write
+
+   jobs:
+     fix:
+       if: >
+         github.event.issue.pull_request &&
+         contains(github.event.comment.body, '/archie fix') &&
+         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+
+         - uses: aidanc667/archie/fix-action@main
+           with:
+             anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+             pr-number: ${{ github.event.issue.number }}
+   ```
+
+2. Add the same `ANTHROPIC_API_KEY` repo secret used for PR review (Settings
+   → Secrets and variables → Actions).
+3. Comment `/archie fix` on any open pull request.
+
+`aidanc667/archie/fix-action@main` is a second, separate composite Action
+from the root one (see [`fix-action/action.yml`](fix-action/action.yml)) — it
+checks out the PR's actual head branch, builds Archie, installs the Claude
+Code CLI, runs `archie fix --yes`, and opens the resulting PR itself.
+
 ## Testing
 
 `npm test` runs 129 tests across 14 files (Vitest), covering the parser, graph construction, risk scoring, the fix pipeline, and CLI integration.

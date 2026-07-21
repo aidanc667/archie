@@ -6,7 +6,7 @@ import type { Ignore } from "ignore";
 
 const ignore = ignorePkg as unknown as (options?: unknown) => Ignore;
 
-const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".py"]);
+const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".py", ".go"]);
 const ALWAYS_EXCLUDED = new Set(["node_modules", ".git"]);
 
 // Archie's own declared package name. A CI workflow that checks out a target

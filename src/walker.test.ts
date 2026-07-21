@@ -14,6 +14,20 @@ describe("walkRepo", () => {
     expect(relative).toEqual(["src/a.ts", "src/b.js"]);
   });
 
+  // Regression coverage for adding Go support: CODE_EXTENSIONS previously
+  // only recognized TS/JS/Python, so a target repo's .go files were silently
+  // invisible to the whole pipeline (no ENOENT, no warning -- they just never
+  // appeared in the walked file list). fixtures/go-basic is a tiny real Go
+  // module (go.mod + two packages + a _test.go file) used across
+  // walker/parser/graph tests.
+  it("finds .go files, including a _test.go file", async () => {
+    const root = path.resolve("fixtures/go-basic");
+    const files = await walkRepo(root);
+    const relative = files.map((f) => path.relative(root, f)).sort();
+
+    expect(relative).toEqual(["helper/helper.go", "widget.go", "widget_test.go"]);
+  });
+
   // Regression coverage for a bug found reviewing a real PR run: a CI
   // workflow that checks out the target repo to the working directory root
   // and then clones Archie itself into a subdirectory (e.g. `archie-tool/`)

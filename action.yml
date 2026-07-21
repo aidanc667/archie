@@ -17,6 +17,14 @@ inputs:
     description: 'Number of top-risk files to review in detail'
     required: false
     default: '10'
+  archie-ref:
+    description: 'Git ref (tag/branch/sha) of the Archie tool to check out — pin this to a release for reproducible CI runs instead of always building the latest default branch'
+    required: false
+    default: 'main'
+  fail-on-severity:
+    description: "Minimum risk severity that fails the Archie check run: 'Critical', 'High', 'Medium', or 'none' to disable the merge gate"
+    required: false
+    default: 'none'
 
 runs:
   using: 'composite'
@@ -25,6 +33,7 @@ runs:
       uses: actions/checkout@v4
       with:
         repository: aidanc667/archie
+        ref: ${{ inputs.archie-ref }}
         path: archie-tool
 
     - name: Setup Node
@@ -32,15 +41,37 @@ runs:
       with:
         node-version: 22
 
+    - name: Cache Archie tool dependencies
+      uses: actions/cache@v4
+      with:
+        path: archie-tool/node_modules
+        key: ${{ runner.os }}-archie-npm-${{ hashFiles('archie-tool/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-archie-npm-
+
     - name: Install Archie dependencies
       shell: bash
       working-directory: archie-tool
+      env:
+        PUPPETEER_SKIP_DOWNLOAD: 'true'
       run: npm ci
 
     - name: Build Archie
       shell: bash
       working-directory: archie-tool
       run: npm run build
+
+    # Archie's parse cache (.archie-cache/parse-cache.json, in the target repo being
+    # analyzed) is keyed internally by a sha256 hash of each file's content, so
+    # restoring a stale or partial cache here is always safe: Archie will simply
+    # recompute anything whose content hash doesn't match what's cached.
+    - name: Cache Archie parse cache
+      uses: actions/cache@v4
+      with:
+        path: .archie-cache
+        key: ${{ runner.os }}-archie-parsecache-${{ github.event.pull_request.base.sha }}
+        restore-keys: |
+          ${{ runner.os }}-archie-parsecache-
 
     - name: Run Archie analysis
       shell: bash
@@ -54,4 +85,14 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: node archie-tool/scripts/post-pr-comment.mjs archie-output.json
+
+    - name: Post check status
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        FAIL_ON_SEVERITY: ${{ inputs.fail-on-severity }}
+      run: node archie-tool/scripts/post-check-status.mjs archie-output.json

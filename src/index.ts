@@ -5,10 +5,16 @@ import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { walkRepo } from "./walker.js";
 import { parseFile, computeComplexity } from "./parser.js";
-import { buildGraph, loadPathAliases, type FileEntry } from "./graph.js";
+import { buildGraph, loadPathAliases, loadGoModuleName, type FileEntry } from "./graph.js";
 import { computeRiskScores } from "./metrics.js";
 import { buildContextPack, loadDependencies } from "./summarizer.js";
-import { generateReport, generateSimplifiedSummary } from "./reasoning.js";
+import {
+  generateReport,
+  generateSimplifiedSummary,
+  type RiskFinding,
+  type ScenarioFinding,
+  type QualityWarning,
+} from "./reasoning.js";
 import type { CodeGraph } from "./types.js";
 import { hashContent, loadCache, saveCache } from "./cache.js";
 import { loadHistory, appendHistoryEntry, type HistoryEntry } from "./history.js";
@@ -30,6 +36,20 @@ export interface PipelineOptions {
 export interface PipelineResult {
   report: string;
   graph: CodeGraph;
+  // Structured findings behind the rendered `report` markdown -- the same
+  // data the report's "Top 5 Architectural Risks" and "Production Failure
+  // Scenarios" sections are generated from. Useful for consumers (e.g. the
+  // PR-comment script) that want per-risk file/severity/metrics without
+  // re-parsing markdown headings out of `report`.
+  risks: RiskFinding[];
+  scenarios: ScenarioFinding[];
+  // Detection-only self-critique findings from generateReport's 4th pass --
+  // specific claims in Sections 1/4/5 that don't trace back to the Context
+  // Pack (a mismatched version number, a symbol claimed as exported that
+  // isn't in exportedSymbols, an absence claim not backed by hasTests/
+  // hasErrorHandling, etc). Empty when the check found nothing, or when the
+  // check itself failed and was skipped (see runQualityCheck).
+  qualityWarnings: QualityWarning[];
   /**
    * Present when `generatePdf` is set. This is simplified summary text only —
    * `runPipeline` never writes a PDF file. Callers who want a PDF should pass
@@ -113,7 +133,8 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
 
   const aliases = await loadPathAliases(root);
   const dependencies = await loadDependencies(root);
-  const graph = buildGraph(parsedByFile, root, aliases);
+  const goModuleName = await loadGoModuleName(root);
+  const graph = buildGraph(parsedByFile, root, aliases, goModuleName);
   const scores = computeRiskScores(graph, complexityByFile);
 
   const restrictToFileIds =
@@ -174,7 +195,13 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   }
 
   const client = new Anthropic({ apiKey });
-  const { report, usage: reportUsage } = await generateReport(client, pack);
+  const {
+    report,
+    risks,
+    scenarios,
+    qualityWarnings,
+    usage: reportUsage,
+  } = await generateReport(client, pack);
 
   let simplifiedSummary: string | undefined;
   let totalInputTokens = reportUsage.inputTokens;
@@ -193,6 +220,9 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   return {
     report,
     graph,
+    risks,
+    scenarios,
+    qualityWarnings,
     simplifiedSummary,
     history: { current: currentEntry, previous: previousEntry },
     usage: {

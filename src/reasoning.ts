@@ -160,7 +160,7 @@ Write a final assessment covering:
 - **Recommended first action:** Exactly one thing the team should do this week, specific enough to assign to a developer.
 - A closing paragraph (3-5 sentences) that gives an honest overall picture — is this codebase ready to scale, or does it need foundational work first? Who is this team, based on what you see? What trajectory are they on?`;
 
-interface RiskFinding {
+export interface RiskFinding {
   title: string;
   file: string;
   severity: "Critical" | "High" | "Medium";
@@ -168,11 +168,39 @@ interface RiskFinding {
   why_it_matters: string;
   root_cause: string;
   evidence: string;
+  complexity: number;
+  fanIn: number;
+  loc: number;
+}
+
+export interface ScenarioFinding {
+  title: string;
+  trigger: string;
+  chain_of_failure: string;
+  business_impact: string;
+  likelihood: "High" | "Medium" | "Low";
+  likelihood_justification: string;
+}
+
+// Pass 4: a detection-only self-critique of Sections 1, 4, and 5 (the three
+// free-text sections Pass 2 writes, which -- unlike Sections 2/3 -- have no
+// schema enforcement and no per-claim grounding check at all today). This
+// intentionally never rewrites report text itself: an automated "fix" risks
+// introducing new errors or breaking formatting, which is a materially
+// different, riskier feature than surfacing issues for a human to review.
+export interface QualityWarning {
+  section: string;
+  claim: string;
+  issue: string;
 }
 
 const REPORT_RISKS_TOOL: Anthropic.Tool = {
   name: "report_risks",
-  description: "Report the top architectural risks as structured data.",
+  description:
+    "Report the top architectural risks as structured data. For each risk, the " +
+    "`complexity`, `fanIn`, and `loc` fields must be copied VERBATIM from the " +
+    "matching entry in the Context Pack's `topRiskFiles` (the file you are citing " +
+    "as the risk's primary file) — do not estimate, round, or invent these numbers.",
   input_schema: {
     type: "object",
     properties: {
@@ -188,6 +216,21 @@ const REPORT_RISKS_TOOL: Anthropic.Tool = {
             why_it_matters: { type: "string" },
             root_cause: { type: "string" },
             evidence: { type: "string" },
+            complexity: {
+              type: "number",
+              description:
+                "Copied verbatim from topRiskFiles[].complexity for this file — do not estimate.",
+            },
+            fanIn: {
+              type: "number",
+              description:
+                "Copied verbatim from topRiskFiles[].fanIn for this file — do not estimate.",
+            },
+            loc: {
+              type: "number",
+              description:
+                "Copied verbatim from topRiskFiles[].loc for this file — do not estimate.",
+            },
           },
           required: [
             "title",
@@ -197,11 +240,87 @@ const REPORT_RISKS_TOOL: Anthropic.Tool = {
             "why_it_matters",
             "root_cause",
             "evidence",
+            "complexity",
+            "fanIn",
+            "loc",
           ],
         },
       },
     },
     required: ["risks"],
+  },
+};
+
+const REPORT_SCENARIOS_TOOL: Anthropic.Tool = {
+  name: "report_scenarios",
+  description: "Report exactly 3 production failure scenarios as structured data.",
+  input_schema: {
+    type: "object",
+    properties: {
+      scenarios: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            title: { type: "string" },
+            trigger: { type: "string" },
+            chain_of_failure: { type: "string" },
+            business_impact: { type: "string" },
+            likelihood: { type: "string", enum: ["High", "Medium", "Low"] },
+            likelihood_justification: { type: "string" },
+          },
+          required: [
+            "title",
+            "trigger",
+            "chain_of_failure",
+            "business_impact",
+            "likelihood",
+            "likelihood_justification",
+          ],
+        },
+      },
+    },
+    required: ["scenarios"],
+  },
+};
+
+const REPORT_QUALITY_CHECK_TOOL: Anthropic.Tool = {
+  name: "report_quality_check",
+  description:
+    "Report any specific claims in the already-written report sections (System Summary, " +
+    "Refactor Plan, Senior Engineer Verdict) that are not grounded in the Context Pack. " +
+    "The `warnings` array may legitimately be empty -- an empty array means no issues were " +
+    "found, which is a valid, good outcome. Do not manufacture issues just to have something " +
+    "to report.",
+  input_schema: {
+    type: "object",
+    properties: {
+      warnings: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            section: {
+              type: "string",
+              description:
+                'Which section the claim appears in, e.g. "1. System Summary" or "5. Senior Engineer Verdict".',
+            },
+            claim: {
+              type: "string",
+              description:
+                "The specific sentence/claim that's ungrounded, quoted or closely paraphrased from the report text.",
+            },
+            issue: {
+              type: "string",
+              description:
+                'Why the claim is ungrounded, e.g. "cites Next.js 15 but dependencies field shows 16.2.2".',
+            },
+          },
+          required: ["section", "claim", "issue"],
+        },
+      },
+    },
+    required: ["warnings"],
   },
 };
 
@@ -212,14 +331,17 @@ const CONFIDENCE_RULES = `Confidence scoring for each risk:
 
 For each risk, also provide:
 - "severity": one of Critical / High / Medium, based on the real-world consequence and blast radius of this risk materialising.
-- "root_cause": 1-2 sentences on the specific technical reason this is risky. Reference the metric or source code evidence, e.g. "fanIn=14 means 14 files depend on this module — a breaking change here cascades across the entire codebase."`;
+- "root_cause": 1-2 sentences on the specific technical reason this is risky. Reference the metric or source code evidence, e.g. "fanIn=14 means 14 files depend on this module — a breaking change here cascades across the entire codebase."
+- "complexity", "fanIn", "loc": copy these three numbers VERBATIM from the matching
+  entry in the Context Pack's \`topRiskFiles\` for the file this risk cites. Do not
+  estimate, round, or infer them — they must exactly match the pack's data.`;
 
 function extractTextBlock(response: Anthropic.Messages.Message): string {
   const textBlock = response.content.find((block) => block.type === "text");
   return textBlock && "text" in textBlock ? textBlock.text : "";
 }
 
-const REQUIRED_RISK_FIELDS = [
+const REQUIRED_RISK_STRING_FIELDS = [
   "title",
   "file",
   "severity",
@@ -228,6 +350,8 @@ const REQUIRED_RISK_FIELDS = [
   "root_cause",
   "evidence",
 ] as const;
+
+const REQUIRED_RISK_NUMBER_FIELDS = ["complexity", "fanIn", "loc"] as const;
 
 // The report_risks tool call is trusted with zero validation downstream
 // (formatRisksSection reads risk.title/severity/etc. directly). If the
@@ -249,7 +373,7 @@ function validateRisks(risks: unknown): RiskFinding[] {
         `report_risks tool call returned a malformed risk at index ${i} (expected an object, got ${typeof risk}). This usually means the response was truncated by the token limit.`
       );
     }
-    for (const field of REQUIRED_RISK_FIELDS) {
+    for (const field of REQUIRED_RISK_STRING_FIELDS) {
       const value = (risk as Record<string, unknown>)[field];
       if (typeof value !== "string" || value.length === 0) {
         throw new Error(
@@ -257,8 +381,92 @@ function validateRisks(risks: unknown): RiskFinding[] {
         );
       }
     }
+    for (const field of REQUIRED_RISK_NUMBER_FIELDS) {
+      const value = (risk as Record<string, unknown>)[field];
+      if (typeof value !== "number") {
+        throw new Error(
+          `report_risks tool call returned a malformed risk at index ${i}: "${field}" is missing or not a number. This usually means the response was truncated by the token limit.`
+        );
+      }
+    }
   });
   return risks as RiskFinding[];
+}
+
+const REQUIRED_SCENARIO_STRING_FIELDS = [
+  "title",
+  "trigger",
+  "chain_of_failure",
+  "business_impact",
+  "likelihood",
+  "likelihood_justification",
+] as const;
+
+const ALLOWED_LIKELIHOODS = new Set(["High", "Medium", "Low"]);
+
+// Mirrors validateRisks exactly: the report_scenarios tool call is trusted
+// with zero validation downstream (formatScenariosSection reads
+// scenario.title/trigger/etc. directly), so a truncated or malformed
+// response must fail loudly rather than silently render "undefined" fields.
+function validateScenarios(scenarios: unknown): ScenarioFinding[] {
+  if (!Array.isArray(scenarios)) {
+    throw new Error(
+      `report_scenarios tool call returned a malformed "scenarios" field (expected an array, got ${typeof scenarios}). This usually means the response was truncated by the token limit — try again, or reduce --topN to shrink the context pack.`
+    );
+  }
+  scenarios.forEach((scenario, i) => {
+    if (typeof scenario !== "object" || scenario === null) {
+      throw new Error(
+        `report_scenarios tool call returned a malformed scenario at index ${i} (expected an object, got ${typeof scenario}). This usually means the response was truncated by the token limit.`
+      );
+    }
+    for (const field of REQUIRED_SCENARIO_STRING_FIELDS) {
+      const value = (scenario as Record<string, unknown>)[field];
+      if (typeof value !== "string" || value.length === 0) {
+        throw new Error(
+          `report_scenarios tool call returned a malformed scenario at index ${i}: "${field}" is missing or empty. This usually means the response was truncated by the token limit.`
+        );
+      }
+    }
+    const likelihood = (scenario as Record<string, unknown>).likelihood as string;
+    if (!ALLOWED_LIKELIHOODS.has(likelihood)) {
+      throw new Error(
+        `report_scenarios tool call returned a malformed scenario at index ${i}: "likelihood" must be one of High/Medium/Low, got "${likelihood}". This usually means the response was truncated by the token limit.`
+      );
+    }
+  });
+  return scenarios as ScenarioFinding[];
+}
+
+const REQUIRED_QUALITY_WARNING_STRING_FIELDS = ["section", "claim", "issue"] as const;
+
+// Mirrors validateRisks/validateScenarios's strictness, with one deliberate
+// difference: an empty `warnings` array is not just allowed but a good,
+// expected outcome (it means the quality check found nothing to flag), so
+// unlike a truncated/malformed `risks`/`scenarios` field this only throws on
+// structurally malformed data -- never on a legitimately empty array.
+function validateQualityWarnings(warnings: unknown): QualityWarning[] {
+  if (!Array.isArray(warnings)) {
+    throw new Error(
+      `report_quality_check tool call returned a malformed "warnings" field (expected an array, got ${typeof warnings}). This usually means the response was truncated by the token limit.`
+    );
+  }
+  warnings.forEach((warning, i) => {
+    if (typeof warning !== "object" || warning === null) {
+      throw new Error(
+        `report_quality_check tool call returned a malformed warning at index ${i} (expected an object, got ${typeof warning}). This usually means the response was truncated by the token limit.`
+      );
+    }
+    for (const field of REQUIRED_QUALITY_WARNING_STRING_FIELDS) {
+      const value = (warning as Record<string, unknown>)[field];
+      if (typeof value !== "string" || value.length === 0) {
+        throw new Error(
+          `report_quality_check tool call returned a malformed warning at index ${i}: "${field}" is missing or empty. This usually means the response was truncated by the token limit.`
+        );
+      }
+    }
+  });
+  return warnings as QualityWarning[];
 }
 
 const SEVERITY_PRIORITY: Record<RiskFinding["severity"], number> = {
@@ -302,9 +510,23 @@ function formatRisksSection(risks: RiskFinding[]): string {
     lines.push(`**Why this matters:** ${risk.why_it_matters}`);
     lines.push(`**Root cause:** ${risk.root_cause}`);
     lines.push(`**Evidence:** ${risk.evidence}`);
+    lines.push(`*Metrics: complexity=${risk.complexity}, fanIn=${risk.fanIn}, loc=${risk.loc}*`);
     if (risk.confidence === "medium" || risk.confidence === "low") {
       lines.push(CONFIDENCE_CAVEATS[risk.confidence]);
     }
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+function formatScenariosSection(scenarios: ScenarioFinding[]): string {
+  const lines = ["## 3. Production Failure Scenarios", ""];
+  scenarios.forEach((scenario, i) => {
+    lines.push(`### Scenario ${i + 1}: ${scenario.title}`);
+    lines.push(`**Trigger:** ${scenario.trigger}`);
+    lines.push(`**Chain of failure:** ${scenario.chain_of_failure}`);
+    lines.push(`**Business impact:** ${scenario.business_impact}`);
+    lines.push(`**Likelihood:** ${scenario.likelihood} — ${scenario.likelihood_justification}`);
     lines.push("");
   });
   return lines.join("\n");
@@ -390,27 +612,229 @@ async function extractRisks(
   throw lastError;
 }
 
+const MAX_DISPLAYED_SCENARIOS = 3;
+
+// Mirrors extractRisks exactly: same bounded retry on the same
+// truncation/malformation error class, same stop_reason check, same forced
+// tool_choice. This gives Section 3 ("Production Failure Scenarios") the
+// same structural enforcement Section 2's risks already have, instead of
+// relying purely on SCENARIO_GROUNDING_RULE as unenforced prompt text.
+async function extractScenarios(
+  client: Anthropic,
+  pack: ContextPack
+): Promise<{ scenarios: ScenarioFinding[]; usage: TokenUsage }> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_RISK_EXTRACTION_ATTEMPTS; attempt++) {
+    try {
+      const scenariosResponse = await client.messages.create({
+        model: CLAUDE_MODEL,
+        max_tokens: 8192,
+        temperature: 0,
+        system: `${SYSTEM_PROMPT}\n\n${SCENARIO_GROUNDING_RULE}`,
+        messages: [
+          {
+            role: "user",
+            content: `Write exactly ${MAX_DISPLAYED_SCENARIOS} concrete failure scenarios — realistic sequences of events that could cause a production incident or user-facing bug — do not write more or fewer than ${MAX_DISPLAYED_SCENARIOS}, and keep each field concise (1-3 sentences each) so the response fits comfortably within the token budget. Use the report_scenarios tool.\n\n${JSON.stringify(pack, null, 2)}`,
+          },
+        ],
+        tools: [REPORT_SCENARIOS_TOOL],
+        tool_choice: { type: "tool", name: "report_scenarios" },
+      });
+
+      if (scenariosResponse.stop_reason === "max_tokens") {
+        throw new Error(
+          "Claude's scenario-extraction response was truncated (hit the max_tokens limit) before completing. This can happen on very large or complex repos."
+        );
+      }
+
+      const toolUseBlock = scenariosResponse.content.find(
+        (block) => block.type === "tool_use" && block.name === "report_scenarios"
+      );
+      if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
+        throw new Error("Claude did not call report_scenarios tool as expected.");
+      }
+      const scenarios = validateScenarios(
+        (toolUseBlock.input as { scenarios: unknown }).scenarios
+      );
+
+      return {
+        scenarios,
+        usage: {
+          inputTokens: scenariosResponse.usage.input_tokens,
+          outputTokens: scenariosResponse.usage.output_tokens,
+        },
+      };
+    } catch (err) {
+      lastError = err;
+      const isRetryable = err instanceof Error && RETRYABLE_ERROR_RE.test(err.message);
+      if (!isRetryable || attempt === MAX_RISK_EXTRACTION_ATTEMPTS) {
+        if (isRetryable) {
+          throw new Error(
+            `${(err as Error).message} Retried ${MAX_RISK_EXTRACTION_ATTEMPTS} times with no success — try reducing --topN to shrink the context pack.`
+          );
+        }
+        throw err;
+      }
+    }
+  }
+
+  // Unreachable — the loop above always returns or throws — but keeps
+  // TypeScript satisfied that every path returns a value.
+  throw lastError;
+}
+
+const QUALITY_CHECK_SYSTEM_PROMPT = `You are auditing a Staff Engineer's architecture report for ungrounded claims before it
+reaches a reader. You will be given the same Context Pack the report was written from, plus the
+already-written "System Summary", "Refactor Plan", and "Senior Engineer Verdict" sections (sections
+1, 4, and 5) of that report.
+
+Your job is to find any specific claim in those three sections that is not actually grounded in the
+Context Pack. This is the same grounding standard the report-writing prompt was already told to
+follow:
+${ABSENCE_CLAIM_RULE}
+${DEPENDENCY_GROUNDING_RULE}
+${EXPORT_GROUNDING_RULE}
+${SCENARIO_GROUNDING_RULE}
+
+Concretely, check for:
+(a) A version number that doesn't match the Context Pack's \`dependencies\` field.
+(b) An "exported" or "public API" claim about a symbol that does not appear in that file's
+    \`exportedSymbols\`.
+(c) An absence claim ("no tests", "no error handling", "lacks X") that isn't backed by \`hasTests\`
+    or \`hasErrorHandling\` being explicitly false for that file.
+(d) A named file, function, or metric that does not actually appear anywhere in the Context Pack.
+
+Only flag claims you can concretely trace back to a mismatch or absence in the Context Pack — do not
+flag stylistic issues, subjective judgment calls, or claims you merely find surprising. If you find
+nothing wrong, call the report_quality_check tool with an empty \`warnings\` array. Do not manufacture
+issues just to have something to report — a clean report with zero warnings is a valid, good outcome.
+
+For each warning, quote or closely paraphrase the specific offending claim and explain exactly why it
+is ungrounded (e.g. "cites Next.js 15 but dependencies field shows 16.2.2").`;
+
+// Pass 4: detection-only self-critique of Sections 1, 4, and 5. Unlike
+// extractRisks/extractScenarios (whose output is load-bearing -- the report
+// can't be assembled without them), this pass is purely supplementary: a
+// report is still usable without a quality check having run. So on
+// truncation failure after all retries, this does NOT throw and abort the
+// whole report -- it's caught, logged, and swallowed by the caller.
+async function runQualityCheck(
+  client: Anthropic,
+  pack: ContextPack,
+  assembledText: string
+): Promise<{ warnings: QualityWarning[]; usage: TokenUsage }> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_RISK_EXTRACTION_ATTEMPTS; attempt++) {
+    try {
+      const response = await client.messages.create({
+        model: CLAUDE_MODEL,
+        max_tokens: 4096,
+        temperature: 0,
+        system: QUALITY_CHECK_SYSTEM_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: `Here are the already-written report sections (System Summary, Refactor Plan, Senior Engineer Verdict):\n\n${assembledText}\n\nHere is the Context Pack these sections must be grounded in:\n\n${JSON.stringify(pack, null, 2)}\n\nUse the report_quality_check tool.`,
+          },
+        ],
+        tools: [REPORT_QUALITY_CHECK_TOOL],
+        tool_choice: { type: "tool", name: "report_quality_check" },
+      });
+
+      if (response.stop_reason === "max_tokens") {
+        throw new Error(
+          "Claude's quality-check response was truncated (hit the max_tokens limit) before completing."
+        );
+      }
+
+      const toolUseBlock = response.content.find(
+        (block) => block.type === "tool_use" && block.name === "report_quality_check"
+      );
+      if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
+        throw new Error("Claude did not call report_quality_check tool as expected.");
+      }
+      const warnings = validateQualityWarnings(
+        (toolUseBlock.input as { warnings: unknown }).warnings
+      );
+
+      return {
+        warnings,
+        usage: {
+          inputTokens: response.usage.input_tokens,
+          outputTokens: response.usage.output_tokens,
+        },
+      };
+    } catch (err) {
+      lastError = err;
+      const isRetryable = err instanceof Error && RETRYABLE_ERROR_RE.test(err.message);
+      if (!isRetryable || attempt === MAX_RISK_EXTRACTION_ATTEMPTS) {
+        break;
+      }
+    }
+  }
+
+  // This pass is supplementary, not required for a usable report -- unlike
+  // extractRisks/extractScenarios, a failure here must never abort the whole
+  // report. Log and fail open with an empty warnings list instead.
+  console.warn(
+    `[archie] Report quality check failed after ${MAX_RISK_EXTRACTION_ATTEMPTS} attempts and was skipped: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`
+  );
+  return { warnings: [], usage: { inputTokens: 0, outputTokens: 0 } };
+}
+
+function buildQualityCaveatBlock(warnings: QualityWarning[]): string {
+  if (warnings.length === 0) return "";
+
+  const lines = [
+    `> ⚠️ **Automated grounding check flagged ${warnings.length} potential issue(s) in this report:**`,
+    ...warnings.map((w) => `> - [Section ${w.section}] "${w.claim}" — ${w.issue}`),
+  ];
+  return lines.join("\n");
+}
+
 export async function generateReport(
   client: Anthropic,
   pack: ContextPack
-): Promise<{ report: string; usage: TokenUsage }> {
-  const { risks, usage: risksUsage } = await extractRisks(client, pack);
+): Promise<{
+  report: string;
+  risks: RiskFinding[];
+  scenarios: ScenarioFinding[];
+  qualityWarnings: QualityWarning[];
+  usage: TokenUsage;
+}> {
+  // Pass 1 risks and pass 1 scenarios are independent of each other (both
+  // only depend on `pack`), so run them concurrently rather than
+  // sequentially to avoid adding latency for the new third API call.
+  const [
+    { risks, usage: risksUsage },
+    { scenarios, usage: scenariosUsage },
+  ] = await Promise.all([extractRisks(client, pack), extractScenarios(client, pack)]);
 
   const risksSection = formatRisksSection(risks);
+  const scenariosSection = formatScenariosSection(scenarios);
   const scopeStatement = buildScopeStatement(pack);
 
-  // Pass 2: remaining sections with structured risks as context
-  const remainingSectionsPrompt = `You are writing an architecture report. The "Top 5 Architectural Risks" section has already been generated (shown below). Write only sections 1, 3, 4, and 5 — do NOT include section 2.
+  // Pass 2: remaining sections (1, 4, 5) with structured risks as context.
+  // Section 3 is no longer generated here — it now comes from
+  // formatScenariosSection, sourced from the structured, validated
+  // extractScenarios call above.
+  const remainingSectionsPrompt = `You are writing an architecture report. The "Top 5 Architectural Risks" section and the "Production Failure Scenarios" section have already been generated (shown below). Write only sections 1, 4, and 5 — do NOT include section 2 or section 3.
 
-Here are the structured risks for your reference when writing sections 3, 4, and 5:
+Here are the structured risks for your reference when writing sections 4 and 5:
 ${JSON.stringify(risks, null, 2)}
+
+Here are the structured failure scenarios for your reference when writing sections 4 and 5:
+${JSON.stringify(scenarios, null, 2)}
 
 Context Pack:
 ${JSON.stringify(pack, null, 2)}
 
-Write exactly these four sections with these exact headings (no section 2):
+Write exactly these three sections with these exact headings (no section 2, no section 3):
 ## 1. System Summary
-## 3. Production Failure Scenarios
 ## 4. Refactor Plan (step-by-step)
 ## 5. Senior Engineer Verdict`;
 
@@ -424,7 +848,24 @@ Write exactly these four sections with these exact headings (no section 2):
 
   const remainingText = extractTextBlock(remainingResponse);
 
-  // Assemble final report: inject risks section between section 1 and section 3.
+  // Pass 4: detection-only grounding check over the just-written Sections 1,
+  // 4, and 5. Runs after Pass 2 (not in parallel with it) because it needs
+  // that pass's output as input. Never throws -- see runQualityCheck.
+  const { warnings: qualityWarnings, usage: qualityUsage } = await runQualityCheck(
+    client,
+    pack,
+    remainingText
+  );
+  const qualityCaveatBlock = buildQualityCaveatBlock(qualityWarnings);
+  // Caveat block (if any) is placed right after the scope statement and
+  // before the risks section, per the required report layout.
+  const scopeAndCaveat = qualityCaveatBlock
+    ? `${scopeStatement}\n\n${qualityCaveatBlock}`
+    : scopeStatement;
+
+  // Assemble final report: inject risks section between section 1 and
+  // section 4 (section 3 is now generated separately, see above), splicing
+  // in scenariosSection right after risksSection.
   // Found via Archie's own self-analysis: the previous approach required an
   // exact literal "## 3." match and fell back to splitting on that same
   // literal string if the model varied heading formatting even slightly
@@ -433,19 +874,20 @@ Write exactly these four sections with these exact headings (no section 2):
   // (e.g. inside a quoted code example). Matching the heading as a
   // case-insensitive, whitespace-tolerant *line* anchored to the start of a
   // line avoids both problems: it tolerates formatting drift and can't
-  // accidentally match "## 3." appearing mid-sentence.
-  const heading3Match = remainingText.match(/^##\s*3\.[^\n]*$/im);
+  // accidentally match "## 4." appearing mid-sentence.
+  const heading4Match = remainingText.match(/^##\s*4\.[^\n]*$/im);
 
   let finalReport: string;
-  if (heading3Match && heading3Match.index !== undefined) {
-    const section1Text = remainingText.slice(0, heading3Match.index).trimEnd();
-    const section345Text = remainingText.slice(heading3Match.index);
-    finalReport = `${section1Text}\n\n${scopeStatement}\n\n${risksSection}\n\n${section345Text}`;
+  if (heading4Match && heading4Match.index !== undefined) {
+    const section1Text = remainingText.slice(0, heading4Match.index).trimEnd();
+    const section45Text = remainingText.slice(heading4Match.index);
+    finalReport = `${section1Text}\n\n${scopeAndCaveat}\n\n${risksSection}\n\n${scenariosSection}\n\n${section45Text}`;
   } else {
-    // Heading 3 doesn't appear at all -- prepend scope statement and risks
-    // section rather than lose the response outright. validateReportSections
-    // below still catches a report that's missing required sections.
-    finalReport = `${remainingText.trimEnd()}\n\n${scopeStatement}\n\n${risksSection}`;
+    // Heading 4 doesn't appear at all -- prepend scope statement, risks
+    // section, and scenarios section rather than lose the response
+    // outright. validateReportSections below still catches a report that's
+    // missing required sections.
+    finalReport = `${remainingText.trimEnd()}\n\n${scopeAndCaveat}\n\n${risksSection}\n\n${scenariosSection}`;
   }
 
   if (!validateReportSections(finalReport)) {
@@ -455,11 +897,19 @@ Write exactly these four sections with these exact headings (no section 2):
   }
 
   const usage: TokenUsage = {
-    inputTokens: risksUsage.inputTokens + remainingResponse.usage.input_tokens,
-    outputTokens: risksUsage.outputTokens + remainingResponse.usage.output_tokens,
+    inputTokens:
+      risksUsage.inputTokens +
+      scenariosUsage.inputTokens +
+      remainingResponse.usage.input_tokens +
+      qualityUsage.inputTokens,
+    outputTokens:
+      risksUsage.outputTokens +
+      scenariosUsage.outputTokens +
+      remainingResponse.usage.output_tokens +
+      qualityUsage.outputTokens,
   };
 
-  return { report: finalReport, usage };
+  return { report: finalReport, risks, scenarios, qualityWarnings, usage };
 }
 
 const MIN_SUMMARY_LENGTH = 100;

@@ -71,6 +71,40 @@ describe("parseFile", () => {
     expect(byName("_PrivateClass")?.isExported).toBe(false);
   });
 
+  // Regression coverage for adding Go support: verifies both the
+  // function_declaration/method_declaration extraction and the import_spec
+  // extraction (single "fmt" import and a grouped module-path import) against
+  // a real Go file, parsed with the actual tree-sitter-go.wasm grammar --
+  // not asserted from memory of the grammar's node types.
+  it("extracts functions, methods, and imports from a Go file", async () => {
+    const filePath = path.resolve("fixtures/go-basic/widget.go");
+    const result = await parseFile(filePath);
+
+    expect(result.functions.map((f) => f.name)).toEqual(["Widget", "unexportedHelper", "Run"]);
+    // Go has no class/struct-as-class equivalent in this grammar; v1
+    // intentionally does not detect structs as classes.
+    expect(result.classes).toEqual([]);
+    expect(result.imports).toEqual(["fmt", "github.com/acme/widget/helper"]);
+  });
+
+  // Regression coverage for Go's capitalization-based export convention
+  // (verified against tree-sitter-go's node-types.json: function_declaration
+  // uses an `identifier` name field, method_declaration uses a
+  // `field_identifier` name field and a required `receiver` field). A method
+  // is always isExported: false, regardless of its name's capitalization --
+  // the same "can't be imported independently of its receiver" simplification
+  // already applied to JS/TS class methods above.
+  it("marks Go top-level functions as exported based on capitalization, and methods as never exported", async () => {
+    const filePath = path.resolve("fixtures/go-basic/widget.go");
+    const result = await parseFile(filePath);
+
+    const byName = (name: string) => result.functions.find((f) => f.name === name);
+
+    expect(byName("Widget")?.isExported).toBe(true);
+    expect(byName("unexportedHelper")?.isExported).toBe(false);
+    expect(byName("Run")?.isExported).toBe(false);
+  });
+
   // Regression coverage for a bug found running archie from a GitHub Action
   // step in a repo other than archie's own: grammarsDir was resolved via
   // path.resolve("grammars"), which resolves against process.cwd(). When
@@ -151,5 +185,18 @@ describe("computeComplexity", () => {
     const nonexistentPath = path.resolve("fixtures/parser-basic/does-not-exist.ts");
     const complexity = await computeComplexity(nonexistentPath);
     expect(complexity).toBe(1);
+  });
+
+  // Regression coverage for adding Go support: widget.go's Widget function
+  // contains an if/else-if (2 if_statements), a for loop, a nested if inside
+  // the loop, and a two-arm expression switch (case 1 / default) -- base 1 +
+  // 4 if/for branches + 1 expression_case (default_case excluded, matching
+  // the existing convention of not counting a switch's fallthrough arm) = 6.
+  // Confirmed by running computeComplexity itself and reading off the
+  // result, not by hand-counting from memory of the grammar.
+  it("counts Go's if/for/switch-case branches, excluding the default arm", async () => {
+    const filePath = path.resolve("fixtures/go-basic/widget.go");
+    const complexity = await computeComplexity(filePath);
+    expect(complexity).toBe(6);
   });
 });

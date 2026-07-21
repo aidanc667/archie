@@ -36,6 +36,7 @@ export interface ParsedFile {
 let tsLanguage: Parser.Language | undefined;
 let jsLanguage: Parser.Language | undefined;
 let pyLanguage: Parser.Language | undefined;
+let goLanguage: Parser.Language | undefined;
 
 // Single-flight guard found missing via Archie's own self-analysis: a bare
 // `initialized` boolean lets concurrent callers all observe `false` before
@@ -60,6 +61,9 @@ function ensureInitialized(): Promise<void> {
       pyLanguage = await Parser.Language.load(
         path.join(grammarsDir, "tree-sitter-python.wasm")
       );
+      goLanguage = await Parser.Language.load(
+        path.join(grammarsDir, "tree-sitter-go.wasm")
+      );
     })();
   }
   return initPromise;
@@ -69,6 +73,7 @@ function languageFor(filePath: string): Parser.Language {
   const ext = path.extname(filePath);
   if (ext === ".ts" || ext === ".tsx") return tsLanguage!;
   if (ext === ".py") return pyLanguage!;
+  if (ext === ".go") return goLanguage!;
   return jsLanguage!;
 }
 
@@ -122,6 +127,7 @@ async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
   const imports: string[] = [];
 
   const isPython = path.extname(filePath) === ".py";
+  const isGo = path.extname(filePath) === ".go";
 
   // Exported status found missing entirely in an earlier version of this
   // pipeline: nothing computed or tracked which functions/classes a file
@@ -140,8 +146,15 @@ async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
     if (node.type === "function_declaration" || node.type === "function_definition") {
       const nameNode = node.childForFieldName("name");
       if (nameNode) {
+        // Go has no export keyword; its convention is that a capitalized
+        // top-level identifier is exported from the package. This only
+        // applies to top-level function_declaration (verified via
+        // tree-sitter-go's node-types.json) -- method_declaration is handled
+        // in its own branch below and is always isExported: false.
         const isExported = isPython
           ? !nameNode.text.startsWith("_")
+          : isGo
+          ? /^[A-Z]/.test(nameNode.text)
           : isExportStatement(node.parent);
         functions.push({
           name: nameNode.text,
@@ -150,6 +163,23 @@ async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
           isExported,
         });
       }
+    } else if (isGo && node.type === "method_declaration") {
+      const nameNode = node.childForFieldName("name");
+      if (nameNode) {
+        // Same simplification as JS/TS method_definition below: a method
+        // can't be imported independently of its receiver type, so
+        // "exported" (= directly importable by another file) is always
+        // false here, regardless of the method name's capitalization.
+        functions.push({
+          name: nameNode.text,
+          startLine: node.startPosition.row + 1,
+          endLine: node.endPosition.row + 1,
+          isExported: false,
+        });
+      }
+      // Go structs/interfaces have no class_declaration/class_definition
+      // equivalent in this grammar (verified via node-types.json); v1
+      // intentionally skips struct/interface detection as "classes".
     } else if (node.type === "class_declaration" || node.type === "class_definition") {
       const nameNode = node.childForFieldName("name");
       if (nameNode) {
@@ -204,6 +234,17 @@ async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
           isExported: false,
         });
       }
+    } else if (isGo && node.type === "import_spec") {
+      // Matches import_spec directly rather than the enclosing
+      // import_declaration: a grouped `import (...)` block wraps its specs
+      // in an import_spec_list, while a single `import "fmt"` attaches the
+      // spec directly -- walkTree already recurses into both shapes, so
+      // matching on import_spec itself handles both without needing to
+      // special-case the grouping node.
+      const pathNode = node.childForFieldName("path");
+      if (pathNode) {
+        imports.push(pathNode.text.slice(1, -1));
+      }
     } else if (isPython && node.type === "import_from_statement") {
       const moduleNode = node.childForFieldName("module_name");
       if (moduleNode) {
@@ -233,6 +274,15 @@ const BRANCH_NODE_TYPES = new Set([
   "except_clause",
   "conditional_expression",
   "boolean_operator",
+  // Go-specific branch node types, verified against tree-sitter-go's
+  // node-types.json (0.25.0). "if_statement" and "for_statement" above are
+  // already the exact node type names Go's grammar uses too, so no
+  // duplicate entries are needed for those. "default_case" is deliberately
+  // excluded, matching the existing convention of not counting a switch's
+  // default/else fallthrough as its own branch.
+  "expression_case", // a `case` arm of an expression switch statement
+  "type_case", // a `case` arm of a type switch statement
+  "communication_case", // a `case` arm of a select statement
 ]);
 
 // Same per-file isolation as parseFile: one unparseable file shouldn't abort

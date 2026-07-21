@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import path from "node:path";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { buildGraph, loadPathAliases, type PathAliasRule } from "./graph.js";
+import { buildGraph, loadPathAliases, loadGoModuleName, type PathAliasRule } from "./graph.js";
 import type { ParsedFile } from "./parser.js";
 
 describe("buildGraph", () => {
@@ -288,6 +288,116 @@ describe("buildGraph", () => {
 
     const importEdges = graph.edges.filter((e) => e.type === "IMPORTS");
     expect(importEdges).toHaveLength(0);
+  });
+
+  // Regression coverage for adding Go support: Go import specifiers are
+  // rooted at the module's declared go.mod path, not a relative path and not
+  // Python's dotted-module convention. "github.com/acme/widget/helper"
+  // (module "github.com/acme/widget" + package dir "helper") should resolve
+  // to helper/helper.go (v1's documented same-named-file convention), while
+  // the stdlib "fmt" import should produce no edge at all.
+  it("resolves a Go import specifier against the go.mod module path to the corresponding package file", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/widget.go",
+        {
+          loc: 20,
+          parsed: {
+            functions: [],
+            classes: [],
+            imports: ["fmt", "github.com/acme/widget/helper"],
+          },
+        },
+      ],
+      [
+        "/repo/helper/helper.go",
+        { loc: 5, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo", [], "github.com/acme/widget");
+
+    const importEdges = graph.edges.filter((e) => e.type === "IMPORTS");
+    expect(importEdges).toHaveLength(1);
+    expect(importEdges[0].from).toBe("file:widget.go");
+    expect(importEdges[0].to).toBe("file:helper/helper.go");
+  });
+
+  it("leaves a Go import unresolved when no go.mod module name is provided (default behavior unchanged)", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/widget.go",
+        {
+          loc: 20,
+          parsed: { functions: [], classes: [], imports: ["github.com/acme/widget/helper"] },
+        },
+      ],
+      [
+        "/repo/helper/helper.go",
+        { loc: 5, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo");
+
+    const importEdges = graph.edges.filter((e) => e.type === "IMPORTS");
+    expect(importEdges).toHaveLength(0);
+  });
+
+  // Regression coverage for adding Go support: Go's test convention is
+  // `<name>_test.go` co-located in the same directory, unlike `.test.ts`/
+  // `.spec.ts` or Python's `test_*.py`/`*_test.py`. Without extending
+  // TEST_SUFFIX_RE, widget_test.go would never link back to widget.go and
+  // "has tests" would be silently wrong for every Go file that has one.
+  it("emits a TESTED_BY edge from a Go source file to its co-located _test.go file", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/widget.go",
+        { loc: 20, parsed: { functions: [], classes: [], imports: [] } },
+      ],
+      [
+        "/repo/widget_test.go",
+        { loc: 10, parsed: { functions: [], classes: [], imports: ["testing"] } },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo");
+
+    const testedByEdges = graph.edges.filter((e) => e.type === "TESTED_BY");
+    expect(testedByEdges).toHaveLength(1);
+    expect(testedByEdges[0].from).toBe("file:widget.go");
+    expect(testedByEdges[0].to).toBe("file:widget_test.go");
+  });
+});
+
+describe("loadGoModuleName", () => {
+  async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
+    const dir = await mkdtemp(path.join(tmpdir(), "archie-gomod-test-"));
+    try {
+      await fn(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("extracts the module path from a go.mod module directive", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(
+        path.join(dir, "go.mod"),
+        "module github.com/acme/widget\n\ngo 1.22\n",
+        "utf8"
+      );
+
+      const moduleName = await loadGoModuleName(dir);
+      expect(moduleName).toBe("github.com/acme/widget");
+    });
+  });
+
+  it("returns undefined when no go.mod is present, matching the fail-open convention of loadPathAliases", async () => {
+    await withTempDir(async (dir) => {
+      const moduleName = await loadGoModuleName(dir);
+      expect(moduleName).toBeUndefined();
+    });
   });
 });
 

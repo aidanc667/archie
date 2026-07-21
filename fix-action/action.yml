@@ -1,0 +1,109 @@
+name: 'Archie Fix'
+description: 'Runs the Archie automated fix pipeline against a pull request and proposes the result as a new PR back into the same branch'
+author: 'aidanc667'
+branding:
+  icon: 'tool'
+  color: 'green'
+
+inputs:
+  anthropic-api-key:
+    description: 'Anthropic API key used to run the analysis and the fix agent'
+    required: true
+  github-token:
+    description: 'Token used to open the fix PR and comment on the original PR'
+    required: false
+    default: ${{ github.token }}
+  pr-number:
+    description: 'The PR number to run the fix pipeline against'
+    required: true
+  archie-ref:
+    description: 'Git ref (tag/branch/sha) of the Archie tool to check out — pin this to a release for reproducible CI runs instead of always building the latest default branch'
+    required: false
+    default: 'main'
+
+runs:
+  using: 'composite'
+  steps:
+    # v1: only handles PRs from branches in this same repository. A PR opened
+    # from a fork lives on the fork, not here, and `refs/pull/<n>/head` still
+    # resolves for forks too — but pushing the resulting fix branch back would
+    # require `pull_request_target`-style handling (a fork-aware token/permissions
+    # model) that this action does not implement. Out of scope for v1.
+    - name: Checkout PR head
+      uses: actions/checkout@v4
+      with:
+        ref: refs/pull/${{ inputs.pr-number }}/head
+        # Same token used for the API calls in open-fix-pr.mjs later, so the
+        # credentials actions/checkout persists for `git push` line up with
+        # the permissions the caller actually granted this run.
+        token: ${{ inputs.github-token }}
+
+    - name: Checkout Archie
+      uses: actions/checkout@v4
+      with:
+        repository: aidanc667/archie
+        ref: ${{ inputs.archie-ref }}
+        path: archie-tool
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Install Archie dependencies
+      shell: bash
+      working-directory: archie-tool
+      env:
+        PUPPETEER_SKIP_DOWNLOAD: 'true'
+      run: npm ci
+
+    - name: Build Archie
+      shell: bash
+      working-directory: archie-tool
+      run: npm run build
+
+    # Verified via `npm view @anthropic-ai/claude-code` that this is a real,
+    # published package under the same @anthropic-ai npm scope as the SDK
+    # Archie already depends on (currently resolves to 2.1.214) — not a guess.
+    - name: Install Claude Code CLI
+      shell: bash
+      run: npm install -g @anthropic-ai/claude-code
+
+    - name: Run Archie analysis
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+      run: |
+        node archie-tool/dist/cli.js analyze . --json > archie-output.json
+        node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync('archie-output.json','utf8')); fs.writeFileSync('archie-report.md', data.report);"
+
+    # Runs the whole Refactor Plan non-interactively. `--yes` auto-keeps any
+    # step where both the agent and build/test succeeded, and reverts on
+    # failure exactly like the interactive prompt does today — nothing is
+    # committed here, it's left as uncommitted working-tree changes for
+    # open-fix-pr.mjs (next step) to turn into a PR.
+    #
+    # This assumes the installed `claude` CLI picks up ANTHROPIC_API_KEY from
+    # the environment for non-interactive auth. That's a property of the CLI
+    # version installed above, not something this action can verify on your
+    # behalf — check it against whatever `claude` version you're pinned to.
+    - name: Run Archie fix
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+      run: node archie-tool/dist/cli.js fix . --report archie-report.md --yes
+
+    - name: Open fix PR
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        # Passed via env rather than interpolated into `run:` directly -- the
+        # only caller today sources this from github.event.issue.number
+        # (always numeric, not attacker-controlled text), but this is a
+        # reusable public action, and template-interpolating any input
+        # straight into a shell command is a known GitHub Actions script-
+        # injection anti-pattern worth avoiding on general principle even
+        # when the current source happens to be safe.
+        PR_NUMBER: ${{ inputs.pr-number }}
+      run: node archie-tool/scripts/open-fix-pr.mjs "$PR_NUMBER"

@@ -1,0 +1,53 @@
+# Lets a maintainer trigger the Archie automated fix pipeline by commenting
+# `/archie fix` on a pull request. Requires the ANTHROPIC_API_KEY repo secret
+# to be set (Settings -> Secrets and variables -> Actions -> New repository
+# secret).
+#
+# Security model:
+#   - Only triggers for commenters GitHub itself classifies as OWNER, MEMBER,
+#     or COLLABORATOR (github.event.comment.author_association) — a fork PR's
+#     author commenting on their own PR does NOT qualify unless they also
+#     happen to hold one of those roles on this repo.
+#   - Never pushes to the PR branch that triggered it. fix-action always
+#     opens a brand new branch/PR targeting that PR's branch as the base —
+#     the triggering branch itself is only ever checked out and read from.
+#   - Nothing auto-merges. The new PR is a normal proposal that still needs a
+#     normal human review and merge decision, same as any other PR.
+#
+# This file uses `uses: ./fix-action`, which only resolves because this
+# workflow lives inside the Archie repo itself. External consumers of Archie
+# should reference the published action instead:
+#   uses: aidanc667/archie/fix-action@main
+# (see the README for the full external setup, including pinning to a
+# specific ref instead of `main` for reproducible runs.)
+
+name: Archie Fix Command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  fix:
+    if: >
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/archie fix') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      # Required so the runner has this repo's fix-action/action.yml on disk
+      # to resolve `uses: ./fix-action` below — the composite action's own
+      # first step then re-checks-out the PR's actual head ref over this,
+      # which is what fix-action actually operates on.
+      - name: Checkout (to resolve local action)
+        uses: actions/checkout@v4
+
+      - name: Run Archie fix
+        uses: ./fix-action
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          pr-number: ${{ github.event.issue.number }}

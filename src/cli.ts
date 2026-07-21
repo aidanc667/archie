@@ -4,9 +4,12 @@ import { Command } from "commander";
 import { writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { runPipeline } from "./index.js";
 import { resolveDiffScope } from "./diff.js";
 import type { GraphNode, Edge } from "./types.js";
+import type { RiskFinding, ScenarioFinding, QualityWarning } from "./reasoning.js";
+import type { HistoryEntry } from "./history.js";
 
 /**
  * The shape of `archie analyze --json` stdout output. This is a real
@@ -16,14 +19,19 @@ import type { GraphNode, Edge } from "./types.js";
  * or changes meaning — see docs/json-output-schema.md.
  */
 export interface ArchieJsonOutput {
-  version: 2;
+  version: 4;
   repoPath: string;
   topN: number;
   report: string;
+  risks: RiskFinding[];
+  scenarios: ScenarioFinding[];
+  history: { current: HistoryEntry; previous: HistoryEntry | null };
+  qualityWarnings: QualityWarning[];
   diff: {
     requested: boolean;
     scoped: boolean;
     changedFileCount: number | null;
+    changedFiles: string[];
   };
   graph: {
     fileCount: number;
@@ -79,7 +87,7 @@ program
             noCache: opts.noCache,
             filterFiles: diffScope.files,
           });
-          const { report, graph } = result;
+          const { report, graph, risks, scenarios, qualityWarnings } = result;
 
           // Printed unconditionally (both --json and normal mode), not
           // gated behind --verbose: previously the only place this coverage
@@ -122,15 +130,21 @@ program
           }
 
           if (opts.json) {
+            const changedFiles = (diffScope.files ?? []).map((f) => path.relative(resolvedRepo, f));
             const output: ArchieJsonOutput = {
-              version: 2,
+              version: 4,
               repoPath: resolvedRepo,
               topN: Number.parseInt(opts.topN, 10),
               report,
+              risks,
+              scenarios,
+              history: result.history,
+              qualityWarnings,
               diff: {
                 requested: diffScope.requested,
                 scoped: diffScope.scoped,
                 changedFileCount: diffScope.changedFileCount,
+                changedFiles,
               },
               graph: {
                 fileCount: graph.nodes.filter((n) => n.kind === "file").length,
@@ -213,7 +227,12 @@ program
   .argument("<repo>", "path to the target repository")
   .requiredOption("--report <path>", "path to an already-generated ARCHIE report markdown file")
   .option("--verbose", "print pipeline progress to stderr", false)
-  .action(async (repoArg: string, opts: { report: string; verbose: boolean }) => {
+  .option(
+    "--yes",
+    "apply all successful steps without an interactive confirmation prompt (still reverts a step if the agent failed or build/test failed)",
+    false
+  )
+  .action(async (repoArg: string, opts: { report: string; verbose: boolean; yes: boolean }) => {
     const { resolve } = await import("node:path");
     const resolvedRepo = resolve(repoArg);
 
@@ -257,8 +276,12 @@ program
         return;
       }
 
-      const { createInterface } = await import("node:readline/promises");
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const rl = opts.yes
+        ? undefined
+        : (await import("node:readline/promises")).createInterface({
+            input: process.stdin,
+            output: process.stdout,
+          });
 
       let appliedCount = 0;
       let revertedCount = 0;
@@ -294,17 +317,22 @@ program
             continue;
           }
 
-          const answer = await rl.question("Apply this change? [y/N] ");
-          if (answer.trim() === "y" || answer.trim() === "Y") {
+          if (opts.yes) {
             appliedCount++;
+            console.error(`[fix] step ${i + 1} auto-applied (--yes)`);
           } else {
-            execFileSync("git", ["checkout", "--", "."], { cwd: resolvedRepo, encoding: "utf8" });
-            console.error("[fix] reverted changes for this step");
-            revertedCount++;
+            const answer = await rl!.question("Apply this change? [y/N] ");
+            if (answer.trim() === "y" || answer.trim() === "Y") {
+              appliedCount++;
+            } else {
+              execFileSync("git", ["checkout", "--", "."], { cwd: resolvedRepo, encoding: "utf8" });
+              console.error("[fix] reverted changes for this step");
+              revertedCount++;
+            }
           }
         }
       } finally {
-        rl.close();
+        rl?.close();
       }
 
       console.error("");

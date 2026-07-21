@@ -1,5 +1,5 @@
 // src/metrics.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { computeFanInOut, computeRiskScores, computeDependencyDepth } from "./metrics.js";
 import type { CodeGraph } from "./types.js";
 
@@ -102,5 +102,66 @@ describe("computeRiskScores", () => {
     const small = scores.find((s) => s.fileId === "file:small.ts")!;
 
     expect(big.riskScore).toBeGreaterThan(small.riskScore);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("warns when all files tie on a metric (complexity) across 2+ files in scope", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const graph: CodeGraph = {
+      nodes: [
+        { kind: "file", id: "file:a.ts", path: "a.ts", loc: 100 },
+        { kind: "file", id: "file:b.ts", path: "b.ts", loc: 10 },
+      ],
+      edges: [],
+    };
+    const complexityByFile = new Map([
+      ["file:a.ts", 3],
+      ["file:b.ts", 3],
+    ]);
+
+    computeRiskScores(graph, complexityByFile);
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("complexity"));
+  });
+
+  it("does not warn when metrics vary across files", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // An edge from big -> small gives them different fanIn (0 vs 1) and
+    // different dependencyDepth (1 vs 0), in addition to the differing
+    // loc and complexity below — so all four metrics vary.
+    const graph: CodeGraph = {
+      nodes: [
+        { kind: "file", id: "file:big.ts", path: "big.ts", loc: 1000 },
+        { kind: "file", id: "file:small.ts", path: "small.ts", loc: 10 },
+      ],
+      edges: [{ type: "IMPORTS", from: "file:big.ts", to: "file:small.ts", confidence: 1.0 }],
+    };
+    const complexityByFile = new Map([
+      ["file:big.ts", 50],
+      ["file:small.ts", 1],
+    ]);
+
+    computeRiskScores(graph, complexityByFile);
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not warn for a single-file scope even though max === min trivially", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const graph: CodeGraph = {
+      nodes: [{ kind: "file", id: "file:only.ts", path: "only.ts", loc: 100 }],
+      edges: [],
+    };
+    const complexityByFile = new Map([["file:only.ts", 5]]);
+
+    computeRiskScores(graph, complexityByFile);
+
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });

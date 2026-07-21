@@ -165,13 +165,32 @@ export async function loadPathAliases(root: string): Promise<PathAliasRule[]> {
   return [];
 }
 
+// Reads the repo root's go.mod and extracts the module path declared by its
+// `module <path>` directive, so Go import specifiers (which are rooted at
+// that module path, not at a relative directory) can be resolved to real
+// files. Resolves quietly to `undefined` on any missing/unparseable go.mod,
+// matching the fail-open convention used by loadPathAliases/loadDependencies
+// and walker.ts's loadIgnore.
+export async function loadGoModuleName(root: string): Promise<string | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(path.join(root, "go.mod"), "utf8");
+  } catch {
+    return undefined;
+  }
+  const match = /^module\s+(\S+)/m.exec(raw);
+  return match ? match[1] : undefined;
+}
+
 function resolveImport(
   fromFile: string,
   importSpecifier: string,
   fileIdByAbsPath: Map<string, string>,
   root: string,
   isPython: boolean,
-  aliases: PathAliasRule[] = []
+  aliases: PathAliasRule[] = [],
+  isGo = false,
+  goModuleName?: string
 ): string | undefined {
   const knownExtensions = [".ts", ".tsx", ".js", ".jsx", ".py"];
   const extensions = ["", ".ts", ".tsx", ".js", ".jsx", ".py"];
@@ -206,6 +225,32 @@ function resolveImport(
     const asRelativePath = importSpecifier.replace(/\./g, "/");
     const found = resolveCandidates(path.resolve(root, asRelativePath));
     if (found) return found;
+  }
+
+  // Go import specifiers are rooted at the importing module's declared
+  // path (from go.mod's `module <path>` directive) -- neither a relative
+  // path nor Python's dotted-module convention. A specifier that isn't
+  // this module's own path (a third-party or stdlib import, e.g. "fmt" or
+  // "github.com/some/other/pkg") is expected to produce no edge, same as
+  // every other language today. Go imports name a PACKAGE (a directory),
+  // not a specific file; for v1 this resolves to a same-named file inside
+  // that directory (`dirname/dirname.go`), which is the common Go
+  // convention but not a rule the language enforces -- a package whose
+  // primary file isn't named after its own directory is a known,
+  // documented gap here, not a silently-wrong claim (same tone as
+  // loadPathAliases' documented `extends`-chain gap above).
+  if (isGo && goModuleName) {
+    let relPackagePath: string | undefined;
+    if (importSpecifier === goModuleName) {
+      relPackagePath = "";
+    } else if (importSpecifier.startsWith(`${goModuleName}/`)) {
+      relPackagePath = importSpecifier.slice(goModuleName.length + 1);
+    }
+    if (relPackagePath !== undefined) {
+      const dirName = path.basename(relPackagePath) || path.basename(root);
+      const candidate = path.resolve(root, relPackagePath, `${dirName}.go`);
+      return fileIdByAbsPath.get(candidate);
+    }
   }
 
   // Non-relative specifier: try tsconfig/jsconfig "paths" aliases (e.g. `@/*`)
@@ -243,7 +288,11 @@ function resolveImport(
   return undefined;
 }
 
-const TEST_SUFFIX_RE = /(\.(test|spec)\.(ts|tsx|js|jsx)$)|((_test|\.test)\.py$)/;
+// Go's test convention is `<name>_test.go`, co-located in the same
+// directory as `<name>.go` -- unlike `.test.ts`/`.spec.ts` or `test_*.py`,
+// there's no separate "prefix" form to worry about, so a single suffix
+// alternative (mirroring the Python `_test.py` suffix case) is enough.
+const TEST_SUFFIX_RE = /(\.(test|spec)\.(ts|tsx|js|jsx)$)|((_test|\.test)\.py$)|(_test\.go$)/;
 
 const PY_TEST_PREFIX_RE = /^test_(.+)\.py$/;
 
@@ -281,7 +330,8 @@ function sourceKey(relPath: string): string {
 export function buildGraph(
   parsedByFile: Map<string, FileEntry>,
   root: string,
-  aliases: PathAliasRule[] = []
+  aliases: PathAliasRule[] = [],
+  goModuleName?: string
 ): CodeGraph {
   const nodes: GraphNode[] = [];
   const edges: Edge[] = [];
@@ -347,9 +397,19 @@ export function buildGraph(
   for (const [absPath, entry] of parsedByFile) {
     const fileId = fileIdByAbsPath.get(absPath)!;
     const isPython = path.extname(absPath) === ".py";
+    const isGo = path.extname(absPath) === ".go";
     const resolvedTargets = new Set<string>();
     for (const importSpecifier of entry.parsed.imports) {
-      const targetId = resolveImport(absPath, importSpecifier, fileIdByAbsPath, root, isPython, aliases);
+      const targetId = resolveImport(
+        absPath,
+        importSpecifier,
+        fileIdByAbsPath,
+        root,
+        isPython,
+        aliases,
+        isGo,
+        goModuleName
+      );
       if (targetId) {
         resolvedTargets.add(targetId);
       }

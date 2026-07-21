@@ -122,6 +122,22 @@ export function computeRiskScores(
   const locRange = minMax(locs);
   const depthRange = minMax(depths);
 
+  if (raw.length >= 2) {
+    const collapsedMetrics: Array<{ name: string; range: { min: number; max: number } }> = [
+      { name: "complexity", range: complexityRange },
+      { name: "fanIn", range: fanInRange },
+      { name: "loc", range: locRange },
+      { name: "dependencyDepth", range: depthRange },
+    ];
+    for (const { name, range } of collapsedMetrics) {
+      if (range.max === range.min) {
+        console.warn(
+          `[archie] Risk scoring: all files have identical ${name} (no variation) — the ${name} term contributes 0 to every risk score in this run`
+        );
+      }
+    }
+  }
+
   return raw.map((r) => {
     const riskScore =
       0.4 * normalize(r.complexity, complexityRange.min, complexityRange.max) +
