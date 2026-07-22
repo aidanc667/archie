@@ -1,11 +1,14 @@
 // src/summarizer.ts
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import type { CodeGraph } from "./types.js";
+import type { CodeGraph, FileNode } from "./types.js";
 import type { RiskScore } from "./metrics.js";
 import { detectFileLanguage } from "./consistency.js";
 import type { NamingConsistencyReport } from "./consistency.js";
 import { computeTestQualitySignal } from "./testquality.js";
+import type { DuplicationReport } from "./duplication.js";
+import type { DeadFileReport } from "./deadcode.js";
+import type { MagicNumberOccurrence } from "./parser.js";
 
 export interface ContextPackOptions {
   topN: number;
@@ -69,6 +72,12 @@ export interface TopRiskFile {
   // actually is. Zero/false when there is no matching test file at all.
   testCaseCount: number;
   hasTestAssertions: boolean;
+  // This file's own raw magic-number occurrences, sourced from its FileNode
+  // (via the graph) -- pipeline-internal prompt evidence, like testCaseCount/
+  // hasTestAssertions above, NOT part of the JSON schema. Defaults to []
+  // (never undefined) when the FileNode has no magicNumbers set, matching
+  // this codebase's fail-open convention for missing optional signals.
+  magicNumbers: MagicNumberOccurrence[];
 }
 
 export interface ClusterSummary {
@@ -88,6 +97,14 @@ export interface ContextPack {
   // top-n-detail and cluster-summary modes -- unlike topRiskFiles, which is
   // empty in cluster-summary mode.
   namingConsistency: NamingConsistencyReport;
+  // A whole-codebase signal (not scoped to top-N), so it belongs in both
+  // top-n-detail and cluster-summary modes -- unlike topRiskFiles, which is
+  // empty in cluster-summary mode.
+  duplication: DuplicationReport;
+  // A whole-codebase signal (not scoped to top-N), so it belongs in both
+  // top-n-detail and cluster-summary modes -- unlike topRiskFiles, which is
+  // empty in cluster-summary mode.
+  deadFiles: DeadFileReport;
 }
 
 // Rough token estimate: ~4 characters per token. This measures the length of the
@@ -188,6 +205,8 @@ export function buildContextPack(
   sourceByPath: Map<string, string>,
   options: ContextPackOptions,
   namingConsistency: NamingConsistencyReport,
+  duplication: DuplicationReport,
+  deadFiles: DeadFileReport,
   dependencies?: Record<string, string>
 ): ContextPack {
   const paths = pathByFileId(graph);
@@ -195,6 +214,9 @@ export function buildContextPack(
   const tested = testedFileIds(graph);
   const exported = exportedNodeIds(graph);
   const testFileIds = testFileIdByFile(graph);
+  const fileNodesById = new Map<string, FileNode>(
+    graph.nodes.filter((n): n is FileNode => n.kind === "file").map((n) => [n.id, n])
+  );
 
   const eligible = options.restrictToFileIds
     ? scores.filter((s) => options.restrictToFileIds!.has(s.fileId))
@@ -231,6 +253,7 @@ export function buildContextPack(
         exportedSymbols: exportedSymbolsForFile(graph, s.fileId, exported),
         testCaseCount: testQuality.testCaseCount,
         hasTestAssertions: testQuality.hasTestAssertions,
+        magicNumbers: fileNodesById.get(s.fileId)?.magicNumbers ?? [],
       };
     });
 
@@ -246,6 +269,8 @@ export function buildContextPack(
       clusters: [],
       dependencies,
       namingConsistency,
+      duplication,
+      deadFiles,
     };
 
     if (estimateTokens(candidate) <= options.maxTokens) {
@@ -264,5 +289,7 @@ export function buildContextPack(
     clusters: buildClusterSummary(scores),
     dependencies,
     namingConsistency,
+    duplication,
+    deadFiles,
   };
 }

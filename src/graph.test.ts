@@ -74,6 +74,35 @@ describe("buildGraph", () => {
     );
   });
 
+  // magicNumbers is purely additive to ParsedFile/FileNode, mirroring bodyHash
+  // above -- buildGraph must copy it through to the graph's FileNode, or every
+  // downstream magic-number-surfacing consumer would silently lose it despite
+  // parser.ts computing it correctly.
+  it("copies magicNumbers from ParsedFile through to the resulting FileNode", () => {
+    const parsedByFile = new Map<string, { loc: number; parsed: ParsedFile }>([
+      [
+        "/repo/src/a.ts",
+        {
+          loc: 10,
+          parsed: {
+            functions: [],
+            classes: [],
+            imports: [],
+            magicNumbers: [{ value: "42", line: 3 }, { value: "9000", line: 7 }],
+          },
+        },
+      ],
+    ]);
+
+    const graph = buildGraph(parsedByFile, "/repo");
+
+    const fileNode = graph.nodes.find((n) => n.kind === "file");
+    expect(fileNode && "magicNumbers" in fileNode ? fileNode.magicNumbers : undefined).toEqual([
+      { value: "42", line: 3 },
+      { value: "9000", line: 7 },
+    ]);
+  });
+
   // Regression coverage for a false claim found on a real report: Archie
   // named four private helper functions as exported (claiming "13 exported
   // functions") because nothing tracked which functions/classes a file

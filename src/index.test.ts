@@ -4,6 +4,8 @@ import path from "node:path";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { runPipeline } from "./index.js";
+import { findDuplicateGroups } from "./duplication.js";
+import { computeDeadFiles } from "./deadcode.js";
 
 const REQUIRED_HEADINGS = [
   "1. System Summary",
@@ -210,6 +212,23 @@ describe("runPipeline with generatePdf", () => {
     expect(result.namingConsistency).toBeDefined();
     expect(Array.isArray(result.namingConsistency.inconsistencies)).toBe(true);
     expect(typeof result.namingConsistency.dominantStyleByGroup).toBe("object");
+  });
+
+  // Required test #4: PipelineResult.duplication/.deadFiles must be populated
+  // by runPipeline directly from the graph, same shape as
+  // findDuplicateGroups/computeDeadFiles's own return types -- whole-codebase
+  // signals computed once, independent of generatePdf or any other option.
+  it("populates result.duplication and result.deadFiles from the graph, matching findDuplicateGroups/computeDeadFiles", async () => {
+    const repoPath = path.resolve("fixtures/parser-basic");
+    const result = await runPipeline({
+      repoPath,
+      topN: 5,
+      maxTokens: 50000,
+      generatePdf: false,
+    });
+
+    expect(result.duplication).toEqual(findDuplicateGroups(result.graph));
+    expect(result.deadFiles).toEqual(computeDeadFiles(result.graph));
   });
 
   it("leaves simplifiedSummary undefined when generatePdf is false", async () => {

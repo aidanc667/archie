@@ -1,9 +1,18 @@
 // src/types.ts
+import type { MagicNumberOccurrence } from "./parser.js";
+
 export interface FileNode {
   kind: "file";
   id: string;
   path: string;
   loc: number;
+  // Raw magic-number occurrences found in this file's source (excludes 0/1/-1
+  // and const-declared values -- see parser.ts's magic-number extraction for
+  // the exact exclusion rules). Optional, not required: dozens of test
+  // fixtures across the suite construct FileNode literals directly without
+  // this field, and this addition must stay purely additive rather than
+  // forcing every one of them to change.
+  magicNumbers?: MagicNumberOccurrence[];
 }
 
 export interface FunctionNode {

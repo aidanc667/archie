@@ -93,6 +93,41 @@ a vague impression from the file's \`source\` alone. Do not claim a file's tests
 and \`hasTestAssertions\` is always false by definition — this is not itself a separate finding, it's the same
 absence already covered by \`ABSENCE_CLAIM_RULE\`.`;
 
+export const MAGIC_NUMBER_GROUNDING_RULE = `Grounding rule for magic numbers: each top-risk file's
+\`magicNumbers\` field lists the exact unexplained numeric literals actually found in that file's source
+(excluding 0, 1, -1, and any value declared as a named constant) along with the line each occurs on. Only
+cite a specific magic number as evidence (e.g. "a hardcoded 86400 on line 42") if that exact value and line
+appear in that file's \`magicNumbers\` array. If a top-risk file's \`magicNumbers\` array is empty, say nothing
+about magic numbers for that file at all — do not compliment it for avoiding magic numbers or claim none
+exist. An empty array only means none were found in the files that happened to make the top-N cut, not that
+the whole codebase is free of them. A claim about a magic number that isn't backed by a real entry in that
+file's array is a fabrication, not a finding.`;
+
+export const DUPLICATION_GROUNDING_RULE = `Grounding rule for duplication: the Context Pack's
+\`duplication.groups\` field lists specific groups of functions that were found to share the exact same
+normalized structural shape (identifiers and literal content collapsed away, so this catches copies renamed
+or re-parameterized, not just verbatim text matches) across two or more distinct files. Only claim that two
+files or functions contain duplicated logic if they actually appear together as entries within the SAME group
+in \`duplication.groups\` — cite the real function names and file paths from that entry, not a vague
+"this looks similar to" impression from reading source. This is a real, checked structural match, not a
+stylistic or subjective judgment call — treat it with the same confidence as any other graph-derived fact. If
+\`duplication.groups\` is empty, say nothing about cross-file duplication at all: do not claim the codebase is
+free of duplicate logic. An empty array only means no structural match was detected among the functions that
+had a computable body hash — it is not an affirmative, deliberate check that no duplication exists anywhere.
+A duplication claim that isn't backed by a real group entry is a fabrication, not a finding.`;
+
+export const DEAD_FILE_GROUNDING_RULE = `Grounding rule for dead files: the Context Pack's
+\`deadFiles.candidates\` field lists files with zero detected IMPORTS edges pointing to them, that also don't
+look like an entry point (by a known basename like \`index\`/\`main\`/\`cli\`/\`app\`/\`server\`) or a test file.
+Only describe a file as "possibly dead code," "appears unused," or similar if it actually appears in
+\`deadFiles.candidates\` — and even then, phrase it as something worth verifying, not a certainty: this is a
+heuristic based on statically detected imports within this repo, and it cannot see dynamic imports, a file
+invoked only from a CLI entry point under some other basename, or wiring declared in a non-JS/TS/Go/Python
+manifest. If \`deadFiles.candidates\` is empty, say nothing about dead or unused files at all — do not claim
+every file is in active use. An empty array only means the heuristic found no candidate, not that dead code
+has been ruled out. A dead-code claim about a file that isn't in \`deadFiles.candidates\`, or one stated as a
+certainty rather than something to verify, is a fabrication, not a finding.`;
+
 const SYSTEM_PROMPT = `You are a Staff Engineer writing a formal architecture review for a software engineering team.
 You will be given a Context Pack: a system summary, top-risk files with full source code and metrics
 (complexity, fan-in, LOC, dependency depth, hasTests, testCaseCount, hasTestAssertions), a dependency graph
@@ -108,6 +143,9 @@ ${DEPENDENCY_GROUNDING_RULE}
 ${EXPORT_GROUNDING_RULE}
 ${NAMING_CONSISTENCY_RULE}
 ${TEST_QUALITY_GROUNDING_RULE}
+${MAGIC_NUMBER_GROUNDING_RULE}
+${DUPLICATION_GROUNDING_RULE}
+${DEAD_FILE_GROUNDING_RULE}
 - Every risk and finding must cite a specific file, function, or metric from the Context Pack.
   Format citations inline as \`filename.ts\` or \`filename.ts → functionName\`. No bare assertions.
 
@@ -123,7 +161,7 @@ Write 3-5 sentences covering:
   number must come from the Context Pack's \`dependencies\` field (see grounding rule above) — never
   inferred or guessed
 - Scale indicators: total files, LOC, rough complexity level (simple / moderate / complex)
-- One sentence on overall architectural style (e.g. "monolithic with a clean pipeline pattern" or "loosely coupled modules with a central orchestrator"). If the Context Pack's \`namingConsistency.inconsistencies\` array is non-empty, also mention this here, citing a real example from that array (see grounding rule above). If the array is empty, say nothing about naming consistency at all.
+- One sentence on overall architectural style (e.g. "monolithic with a clean pipeline pattern" or "loosely coupled modules with a central orchestrator"). If the Context Pack's \`namingConsistency.inconsistencies\` array is non-empty, also mention this here, citing a real example from that array (see grounding rule above). If the array is empty, say nothing about naming consistency at all. Likewise, if \`duplication.groups\` is non-empty, mention it here too, citing a real example (see grounding rule above) — say nothing if it's empty. Likewise, if \`deadFiles.candidates\` is non-empty, mention it here too, citing a real example (see grounding rule above) — say nothing if it's empty.
 
 Then a **Key Metrics** block:
 
@@ -725,6 +763,9 @@ ${EXPORT_GROUNDING_RULE}
 ${SCENARIO_GROUNDING_RULE}
 ${NAMING_CONSISTENCY_RULE}
 ${TEST_QUALITY_GROUNDING_RULE}
+${MAGIC_NUMBER_GROUNDING_RULE}
+${DUPLICATION_GROUNDING_RULE}
+${DEAD_FILE_GROUNDING_RULE}
 
 Concretely, check for:
 (a) A version number that doesn't match the Context Pack's \`dependencies\` field.
@@ -738,6 +779,14 @@ Concretely, check for:
     about consistent naming when that array is empty.
 (f) A test-quality claim ("comprehensive tests", "just a smoke test", "thin coverage") that isn't
     backed by that file's actual \`testCaseCount\`/\`hasTestAssertions\` values.
+(g) A magic-number claim that cites a value/line not actually present in that file's \`magicNumbers\`
+    array, or any magic-number claim at all for a file whose \`magicNumbers\` array is empty.
+(h) A cross-file duplication claim about two files/functions that don't actually appear together in
+    the same entry of \`duplication.groups\`, or any duplication claim at all when \`duplication.groups\`
+    is empty.
+(i) A dead-code/"appears unused" claim about a file that isn't in \`deadFiles.candidates\`, one stated
+    as a certainty rather than something to verify, or any such claim at all when \`deadFiles.candidates\`
+    is empty.
 
 Only flag claims you can concretely trace back to a mismatch or absence in the Context Pack — do not
 flag stylistic issues, subjective judgment calls, or claims you merely find surprising. If you find

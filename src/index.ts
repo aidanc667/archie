@@ -9,6 +9,8 @@ import { buildGraph, loadPathAliases, loadGoModuleName, type FileEntry } from ".
 import { computeRiskScores } from "./metrics.js";
 import { buildContextPack, loadDependencies } from "./summarizer.js";
 import { computeNamingConsistency, type NamingConsistencyReport } from "./consistency.js";
+import { findDuplicateGroups, type DuplicationReport } from "./duplication.js";
+import { computeDeadFiles, type DeadFileReport } from "./deadcode.js";
 import {
   generateReport,
   generateSimplifiedSummary,
@@ -71,6 +73,14 @@ export interface PipelineResult {
   // function among mostly camelCase ones), computed once per run directly
   // from the graph -- independent of which files made the top-N cut.
   namingConsistency: NamingConsistencyReport;
+  // Whole-codebase cross-file duplicate-function signal, computed once per
+  // run directly from the graph -- independent of which files made the
+  // top-N cut.
+  duplication: DuplicationReport;
+  // Whole-codebase dead-file-candidate signal (files with no detected
+  // importers), computed once per run directly from the graph --
+  // independent of which files made the top-N cut.
+  deadFiles: DeadFileReport;
 }
 
 export async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
@@ -141,6 +151,8 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const goModuleName = await loadGoModuleName(root);
   const graph = buildGraph(parsedByFile, root, aliases, goModuleName);
   const namingConsistency = computeNamingConsistency(graph);
+  const duplication = findDuplicateGroups(graph);
+  const deadFiles = computeDeadFiles(graph);
   const scores = computeRiskScores(graph, complexityByFile);
 
   const restrictToFileIds =
@@ -154,6 +166,8 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     sourceByPath,
     { topN: options.topN, maxTokens: options.maxTokens, restrictToFileIds },
     namingConsistency,
+    duplication,
+    deadFiles,
     dependencies
   );
 
@@ -243,5 +257,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       mode: pack.mode,
     },
     namingConsistency,
+    duplication,
+    deadFiles,
   };
 }

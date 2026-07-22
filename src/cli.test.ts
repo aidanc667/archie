@@ -311,7 +311,7 @@ describe("archie analyze --json output shape", () => {
   it("produces a JSON-serializable ArchieJsonOutput with the documented top-level keys", async () => {
     const repoPath = path.resolve("fixtures/parser-basic");
     const topN = 5;
-    const { report, graph, risks, scenarios, history, qualityWarnings, namingConsistency } = await runPipeline({
+    const { report, graph, risks, scenarios, history, qualityWarnings, namingConsistency, duplication, deadFiles } = await runPipeline({
       repoPath,
       topN,
       maxTokens: 50000,
@@ -320,7 +320,7 @@ describe("archie analyze --json output shape", () => {
 
     // Mirrors the `output` construction in the `--json` branch of src/cli.ts.
     const output: ArchieJsonOutput = {
-      version: 5,
+      version: 6,
       repoPath,
       topN,
       report,
@@ -337,10 +337,12 @@ describe("archie analyze --json output shape", () => {
         edges: graph.edges,
       },
       namingConsistency,
+      duplication,
+      deadFiles,
     };
 
     const parsed = JSON.parse(JSON.stringify(output));
-    expect(parsed.version).toBe(5);
+    expect(parsed.version).toBe(6);
     expect(parsed).toHaveProperty("repoPath");
     expect(parsed).toHaveProperty("topN");
     expect(parsed).toHaveProperty("report");
@@ -353,6 +355,10 @@ describe("archie analyze --json output shape", () => {
     expect(parsed).toHaveProperty("namingConsistency");
     expect(Array.isArray(parsed.namingConsistency.inconsistencies)).toBe(true);
     expect(typeof parsed.namingConsistency.dominantStyleByGroup).toBe("object");
+    expect(parsed).toHaveProperty("duplication");
+    expect(Array.isArray(parsed.duplication.groups)).toBe(true);
+    expect(parsed).toHaveProperty("deadFiles");
+    expect(Array.isArray(parsed.deadFiles.candidates)).toBe(true);
     expect(Array.isArray(parsed.risks)).toBe(true);
     expect(parsed.risks[0]).toMatchObject({
       title: expect.any(String),

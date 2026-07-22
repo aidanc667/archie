@@ -9,6 +9,9 @@ import {
   DEPENDENCY_GROUNDING_RULE,
   EXPORT_GROUNDING_RULE,
   NAMING_CONSISTENCY_RULE,
+  MAGIC_NUMBER_GROUNDING_RULE,
+  DUPLICATION_GROUNDING_RULE,
+  DEAD_FILE_GROUNDING_RULE,
 } from "./reasoning.js";
 import type { ContextPack } from "./summarizer.js";
 
@@ -160,6 +163,8 @@ function makeFakeClient(overrides: {
 }
 
 const EMPTY_NAMING_CONSISTENCY = { inconsistencies: [], dominantStyleByGroup: {} };
+const EMPTY_DUPLICATION = { groups: [] };
+const EMPTY_DEAD_FILES = { candidates: [] };
 
 const BASE_PACK: ContextPack = {
   mode: "top-n-detail",
@@ -168,6 +173,8 @@ const BASE_PACK: ContextPack = {
   graphSnapshot: [],
   clusters: [],
   namingConsistency: EMPTY_NAMING_CONSISTENCY,
+  duplication: EMPTY_DUPLICATION,
+  deadFiles: EMPTY_DEAD_FILES,
 };
 
 describe("generateReport", () => {
@@ -706,6 +713,7 @@ describe("generateReport", () => {
           exportedSymbols: [],
           testCaseCount: 0,
           hasTestAssertions: false,
+          magicNumbers: [],
         },
         {
           path: "src/b.ts",
@@ -719,6 +727,7 @@ describe("generateReport", () => {
           exportedSymbols: [],
           testCaseCount: 0,
           hasTestAssertions: false,
+          magicNumbers: [],
         },
         {
           path: "src/c.ts",
@@ -732,11 +741,14 @@ describe("generateReport", () => {
           exportedSymbols: [],
           testCaseCount: 0,
           hasTestAssertions: false,
+          magicNumbers: [],
         },
       ],
       graphSnapshot: [],
       clusters: [],
       namingConsistency: EMPTY_NAMING_CONSISTENCY,
+      duplication: EMPTY_DUPLICATION,
+      deadFiles: EMPTY_DEAD_FILES,
     };
 
     const { report: result } = await generateReport(fakeClient as any, pack);
@@ -755,6 +767,8 @@ describe("generateReport", () => {
       graphSnapshot: [],
       clusters: [{ fileCount: 500, averageComplexity: 5, maxRiskScore: 0.95 }],
       namingConsistency: EMPTY_NAMING_CONSISTENCY,
+      duplication: EMPTY_DUPLICATION,
+      deadFiles: EMPTY_DEAD_FILES,
     };
 
     const { report: result } = await generateReport(fakeClient as any, pack);
@@ -781,6 +795,7 @@ describe("generateReport", () => {
           exportedSymbols: [],
           testCaseCount: 0,
           hasTestAssertions: false,
+          magicNumbers: [],
         },
         {
           path: "src/b.ts",
@@ -794,11 +809,14 @@ describe("generateReport", () => {
           exportedSymbols: [],
           testCaseCount: 0,
           hasTestAssertions: false,
+          magicNumbers: [],
         },
       ],
       graphSnapshot: [],
       clusters: [],
       namingConsistency: EMPTY_NAMING_CONSISTENCY,
+      duplication: EMPTY_DUPLICATION,
+      deadFiles: EMPTY_DEAD_FILES,
     };
 
     const { report: result } = await generateReport(fakeClient as any, pack);
@@ -1121,6 +1139,83 @@ describe("NAMING_CONSISTENCY_RULE", () => {
     expect(calls[1][0].system).toContain("namingConsistency.inconsistencies");
     expect(calls[2][0].system).toContain("namingConsistency.inconsistencies");
     expect(calls[3][0].system).toContain("namingConsistency.inconsistencies");
+  });
+});
+
+// Required test #6: same direct-string-assertion approach as
+// NAMING_CONSISTENCY_RULE above, for the three new wave-3 grounding rules
+// (magic numbers, duplication, dead files). Each rule must name its field,
+// mention the empty-array case, and end on the fabrication-framing language
+// this file's grounding rules consistently use.
+describe("MAGIC_NUMBER_GROUNDING_RULE", () => {
+  it("instructs the model to only cite a magic number that's actually in that file's magicNumbers array", () => {
+    expect(MAGIC_NUMBER_GROUNDING_RULE).toMatch(/magicNumbers/);
+  });
+
+  it("forbids saying anything about magic numbers for a file whose magicNumbers array is empty", () => {
+    expect(MAGIC_NUMBER_GROUNDING_RULE.toLowerCase()).toMatch(/is empty/);
+    expect(MAGIC_NUMBER_GROUNDING_RULE.toLowerCase()).toMatch(/fabrication/);
+  });
+
+  it("is included in the system prompt sent to Claude for all four passes", async () => {
+    const fakeClient = makeFakeClient();
+
+    await generateReport(fakeClient as any, BASE_PACK);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    expect(calls).toHaveLength(4);
+    expect(calls[0][0].system).toContain("magicNumbers");
+    expect(calls[1][0].system).toContain("magicNumbers");
+    expect(calls[2][0].system).toContain("magicNumbers");
+    expect(calls[3][0].system).toContain("magicNumbers");
+  });
+});
+
+describe("DUPLICATION_GROUNDING_RULE", () => {
+  it("instructs the model to only claim duplication when two files/functions appear together in the same duplication.groups entry", () => {
+    expect(DUPLICATION_GROUNDING_RULE).toMatch(/duplication\.groups/);
+  });
+
+  it("forbids saying anything about cross-file duplication when duplication.groups is empty", () => {
+    expect(DUPLICATION_GROUNDING_RULE.toLowerCase()).toMatch(/is empty/);
+    expect(DUPLICATION_GROUNDING_RULE.toLowerCase()).toMatch(/fabrication/);
+  });
+
+  it("is included in the system prompt sent to Claude for all four passes", async () => {
+    const fakeClient = makeFakeClient();
+
+    await generateReport(fakeClient as any, BASE_PACK);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    expect(calls).toHaveLength(4);
+    expect(calls[0][0].system).toContain("duplication.groups");
+    expect(calls[1][0].system).toContain("duplication.groups");
+    expect(calls[2][0].system).toContain("duplication.groups");
+    expect(calls[3][0].system).toContain("duplication.groups");
+  });
+});
+
+describe("DEAD_FILE_GROUNDING_RULE", () => {
+  it("instructs the model to only call a file possibly dead code when it's in deadFiles.candidates", () => {
+    expect(DEAD_FILE_GROUNDING_RULE).toMatch(/deadFiles\.candidates/);
+  });
+
+  it("forbids saying anything about dead code when deadFiles.candidates is empty", () => {
+    expect(DEAD_FILE_GROUNDING_RULE.toLowerCase()).toMatch(/is empty/);
+    expect(DEAD_FILE_GROUNDING_RULE.toLowerCase()).toMatch(/fabrication/);
+  });
+
+  it("is included in the system prompt sent to Claude for all four passes", async () => {
+    const fakeClient = makeFakeClient();
+
+    await generateReport(fakeClient as any, BASE_PACK);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    expect(calls).toHaveLength(4);
+    expect(calls[0][0].system).toContain("deadFiles.candidates");
+    expect(calls[1][0].system).toContain("deadFiles.candidates");
+    expect(calls[2][0].system).toContain("deadFiles.candidates");
+    expect(calls[3][0].system).toContain("deadFiles.candidates");
   });
 });
 

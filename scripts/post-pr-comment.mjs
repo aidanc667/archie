@@ -15,7 +15,7 @@ import { readFile } from "node:fs/promises";
 
 const MARKER = "<!-- archie-pr-review -->";
 const STATE_RE = /<!-- archie-pr-review-state:(.*?) -->/;
-const SUPPORTED_VERSION = 5;
+const SUPPORTED_VERSION = 6;
 
 const SECTION_HEADING_RE = /## \d\. [^\n]+/g;
 

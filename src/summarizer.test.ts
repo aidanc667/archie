@@ -9,6 +9,8 @@ import * as testqualityModule from "./testquality.js";
 import type { CodeGraph } from "./types.js";
 import type { RiskScore } from "./metrics.js";
 import type { NamingConsistencyReport } from "./consistency.js";
+import type { DuplicationReport } from "./duplication.js";
+import type { DeadFileReport } from "./deadcode.js";
 
 // Wraps the real computeTestQualitySignal in a spy so tests can assert
 // exactly which (source, language) pair it was called with -- or that it was
@@ -27,6 +29,9 @@ const EMPTY_NAMING_CONSISTENCY: NamingConsistencyReport = {
   inconsistencies: [],
   dominantStyleByGroup: {},
 };
+
+const EMPTY_DUPLICATION: DuplicationReport = { groups: [] };
+const EMPTY_DEAD_FILES: DeadFileReport = { candidates: [] };
 
 beforeEach(() => {
   vi.mocked(testqualityModule.computeTestQualitySignal).mockClear();
@@ -73,7 +78,7 @@ function makeThreeFileScores(): RiskScore[] {
 
 describe("buildContextPack", () => {
   it("includes top-N risk files with full metrics and a graph snapshot", () => {
-    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 50000 }, EMPTY_NAMING_CONSISTENCY);
+    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 50000 }, EMPTY_NAMING_CONSISTENCY, EMPTY_DUPLICATION, EMPTY_DEAD_FILES);
 
     expect(pack.topRiskFiles).toHaveLength(1);
     expect(pack.topRiskFiles[0].path).toBe("a.ts");
@@ -94,7 +99,9 @@ describe("buildContextPack", () => {
         maxTokens: 50000,
         restrictToFileIds: new Set(["file:b.ts"]),
       },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     // a.ts has the higher risk score (0.9 vs 0.1) and would normally win the
@@ -108,7 +115,7 @@ describe("buildContextPack", () => {
   });
 
   it("falls back to cluster-summary mode when detail set exceeds token budget", () => {
-    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 1 }, EMPTY_NAMING_CONSISTENCY);
+    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 1 }, EMPTY_NAMING_CONSISTENCY, EMPTY_DUPLICATION, EMPTY_DEAD_FILES);
 
     expect(pack.mode).toBe("cluster-summary");
     expect(pack.topRiskFiles).toEqual([]);
@@ -119,8 +126,15 @@ describe("buildContextPack", () => {
       makeThreeFileGraph(),
       makeThreeFileScores(),
       new Map(),
-      { topN: 3, maxTokens: 170 },
-      EMPTY_NAMING_CONSISTENCY
+      // Bumped from 170: adding the required magicNumbers field to every
+      // TopRiskFile (this phase's wave-3 wiring) grew the serialized pack
+      // size, so the old threshold no longer fit 2 of 3 files -- this value
+      // restores the test's original intent (2 of 3 fit, not all 3), it is
+      // not a change in what's being verified.
+      { topN: 3, maxTokens: 200 },
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     expect(pack.mode).toBe("top-n-detail");
@@ -139,7 +153,9 @@ describe("buildContextPack", () => {
       makeScores(),
       sourceByPath,
       { topN: 1, maxTokens: 50000 },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     expect(pack.topRiskFiles).toHaveLength(1);
@@ -155,7 +171,9 @@ describe("buildContextPack", () => {
       makeScores(),
       sourceByPath,
       { topN: 1, maxTokens: 50000 },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     expect(pack.topRiskFiles).toHaveLength(1);
@@ -183,7 +201,9 @@ describe("buildContextPack", () => {
       scores,
       new Map(),
       { topN: 2, maxTokens: 50000 },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     const fileA = pack.topRiskFiles.find((f) => f.path === "a.ts");
@@ -203,7 +223,9 @@ describe("buildContextPack", () => {
       makeScores(),
       sourceByPath,
       { topN: 2, maxTokens: 50000 },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     const fileA = pack.topRiskFiles.find((f) => f.path === "a.ts");
@@ -242,7 +264,9 @@ describe("buildContextPack", () => {
       scores,
       new Map(),
       { topN: 1, maxTokens: 50000 },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     expect(pack.topRiskFiles[0].exportedSymbols.sort()).toEqual(["PublicClass", "publicFn"]);
@@ -278,7 +302,9 @@ describe("buildContextPack", () => {
       scores,
       new Map(),
       { topN: 5, maxTokens: 50000 },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     const fileD = pack.topRiskFiles.find((f) => f.path === "d.ts");
@@ -299,6 +325,8 @@ describe("buildContextPack", () => {
       new Map(),
       { topN: 1, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES,
       { next: "16.2.2", react: "19.0.0" }
     );
 
@@ -311,7 +339,9 @@ describe("buildContextPack", () => {
       makeScores(),
       new Map(),
       { topN: 1, maxTokens: 50000 },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     expect(pack.dependencies).toBeUndefined();
@@ -324,6 +354,8 @@ describe("buildContextPack", () => {
       new Map(),
       { topN: 1, maxTokens: 1 },
       EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES,
       { next: "16.2.2" }
     );
 
@@ -351,7 +383,15 @@ describe("buildContextPack", () => {
     const expected = computeNamingConsistency(graph);
     expect(expected.inconsistencies.length).toBeGreaterThan(0); // sanity: this fixture actually has one
 
-    const pack = buildContextPack(graph, scores, new Map(), { topN: 1, maxTokens: 50000 }, expected);
+    const pack = buildContextPack(
+      graph,
+      scores,
+      new Map(),
+      { topN: 1, maxTokens: 50000 },
+      expected,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
+    );
 
     expect(pack.mode).toBe("top-n-detail");
     expect(pack.namingConsistency).toEqual(expected);
@@ -361,10 +401,120 @@ describe("buildContextPack", () => {
     const graph = makeGraph();
     const expected = computeNamingConsistency(graph);
 
-    const pack = buildContextPack(graph, makeScores(), new Map(), { topN: 1, maxTokens: 1 }, expected);
+    const pack = buildContextPack(
+      graph,
+      makeScores(),
+      new Map(),
+      { topN: 1, maxTokens: 1 },
+      expected,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
+    );
 
     expect(pack.mode).toBe("cluster-summary");
     expect(pack.namingConsistency).toEqual(expected);
+  });
+
+  // Required test: buildContextPack threads duplication/deadFiles through
+  // unchanged in top-n-detail mode -- these are whole-codebase signals (same
+  // reasoning as namingConsistency above), so they belong in the pack
+  // regardless of which files made the top-N cut.
+  it("populates duplication and deadFiles from the values passed in, in top-n-detail mode", () => {
+    const duplication: DuplicationReport = {
+      groups: [
+        {
+          bodyHash: "hash1",
+          functions: [
+            { name: "doThing", fileId: "file:a.ts" },
+            { name: "doThingToo", fileId: "file:b.ts" },
+          ],
+        },
+      ],
+    };
+    const deadFiles: DeadFileReport = {
+      candidates: [{ fileId: "file:b.ts", path: "b.ts" }],
+    };
+
+    const pack = buildContextPack(
+      makeGraph(),
+      makeScores(),
+      new Map(),
+      { topN: 1, maxTokens: 50000 },
+      EMPTY_NAMING_CONSISTENCY,
+      duplication,
+      deadFiles
+    );
+
+    expect(pack.mode).toBe("top-n-detail");
+    expect(pack.duplication).toEqual(duplication);
+    expect(pack.deadFiles).toEqual(deadFiles);
+  });
+
+  it("populates duplication and deadFiles in the cluster-summary fallback too", () => {
+    const duplication: DuplicationReport = {
+      groups: [
+        {
+          bodyHash: "hash1",
+          functions: [
+            { name: "doThing", fileId: "file:a.ts" },
+            { name: "doThingToo", fileId: "file:b.ts" },
+          ],
+        },
+      ],
+    };
+    const deadFiles: DeadFileReport = {
+      candidates: [{ fileId: "file:b.ts", path: "b.ts" }],
+    };
+
+    const pack = buildContextPack(
+      makeGraph(),
+      makeScores(),
+      new Map(),
+      { topN: 1, maxTokens: 1 },
+      EMPTY_NAMING_CONSISTENCY,
+      duplication,
+      deadFiles
+    );
+
+    expect(pack.mode).toBe("cluster-summary");
+    expect(pack.duplication).toEqual(duplication);
+    expect(pack.deadFiles).toEqual(deadFiles);
+  });
+
+  // Required test: a top-risk file's magicNumbers field is sourced from that
+  // file's FileNode.magicNumbers (via the graph), defaulting to [] when the
+  // FileNode has none set (older-style fixture, or a file with none found) --
+  // mirrors the ?? [] fail-open convention used elsewhere in this codebase for
+  // missing optional signals (dependencies, goModuleName, path aliases).
+  it("populates topRiskFiles[].magicNumbers from the file's FileNode.magicNumbers, defaulting to [] when unset", () => {
+    const graph: CodeGraph = {
+      nodes: [
+        {
+          kind: "file",
+          id: "file:a.ts",
+          path: "a.ts",
+          loc: 100,
+          magicNumbers: [{ value: "42", line: 3 }],
+        },
+        { kind: "file", id: "file:b.ts", path: "b.ts", loc: 10 }, // no magicNumbers field at all
+      ],
+      edges: [],
+    };
+
+    const pack = buildContextPack(
+      graph,
+      makeScores(),
+      new Map(),
+      { topN: 2, maxTokens: 50000 },
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
+    );
+
+    const fileA = pack.topRiskFiles.find((f) => f.path === "a.ts");
+    const fileB = pack.topRiskFiles.find((f) => f.path === "b.ts");
+    expect(fileA?.magicNumbers).toEqual([{ value: "42", line: 3 }]);
+    expect(fileB?.magicNumbers).toEqual([]);
   });
 
   // Required test #2: a top-risk file with a matching test file gets its
@@ -399,7 +549,9 @@ describe("buildContextPack", () => {
       scores,
       sourceByPath,
       { topN: 1, maxTokens: 50000 },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     expect(pack.topRiskFiles[0].testCaseCount).toBe(2);
@@ -425,7 +577,9 @@ describe("buildContextPack", () => {
       makeScores(),
       new Map(),
       { topN: 2, maxTokens: 50000 },
-      EMPTY_NAMING_CONSISTENCY
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES
     );
 
     expect(pack.topRiskFiles).toHaveLength(2);

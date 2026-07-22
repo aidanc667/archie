@@ -14,7 +14,7 @@ The TypeScript type for this shape is `ArchieJsonOutput`, exported from `src/cli
 
 ```typescript
 interface ArchieJsonOutput {
-  version: 5;
+  version: 6;
   repoPath: string;
   topN: number;
   report: string;
@@ -36,12 +36,14 @@ interface ArchieJsonOutput {
     edges: Edge[];
   };
   namingConsistency: NamingConsistencyReport;
+  duplication: DuplicationReport;
+  deadFiles: DeadFileReport;
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | `5` | Schema version of this JSON output, as a literal number. Currently always `5`. See "Stability" below. |
+| `version` | `6` | Schema version of this JSON output, as a literal number. Currently always `6`. See "Stability" below. |
 | `repoPath` | `string` | Absolute, resolved filesystem path to the repository that was analyzed (the `<path>` argument, resolved via `path.resolve`). |
 | `topN` | `number` | The `--topN` value used for this run (number of top-risk files included in report detail). Parsed from the CLI flag, default `10`. |
 | `report` | `string` | The full architecture report as a markdown string. See "Report field structure" below. |
@@ -60,6 +62,8 @@ interface ArchieJsonOutput {
 | `graph.nodes` | `GraphNode[]` | Full array of graph nodes (files, functions, classes). See "GraphNode" below. |
 | `graph.edges` | `Edge[]` | Full array of graph edges (relationships between nodes). See "Edge" below. |
 | `namingConsistency` | `NamingConsistencyReport` | Naming-case consistency findings computed once across the *whole* codebase (not scoped to top-risk files) — e.g. a lone `snake_case` function sitting among an otherwise `camelCase` group of the same (language, kind). See "`NamingConsistencyReport`" below. |
+| `duplication` | `DuplicationReport` | Cross-file duplicate-function groups computed once across the *whole* codebase (not scoped to top-risk files) — functions sharing the same normalized structural shape across 2+ distinct files. See "`DuplicationReport`" below. |
+| `deadFiles` | `DeadFileReport` | Dead-file candidates computed once across the *whole* codebase (not scoped to top-risk files) — files with no detected importers that also don't look like an entry point or test file. See "`DeadFileReport`" below. |
 
 > **Warning — `nodeCount` is not a file count.** `graph.nodes` is a discriminated union of `FileNode`, `FunctionNode`, and `ClassNode`; `nodeCount` sums all three. An earlier version of `scripts/post-pr-comment.mjs` reported `graph.nodeCount` as "changed files" in the PR comment, which produced numbers like "345 changed files" on PRs that touched exactly one file — the real count was every function and class node in the (sometimes full-repo-fallback) graph, not files, and not scoped to the diff. Use `graph.fileCount` for a file count, and `diff.changedFileCount` for the actual diff-scoped count.
 
@@ -249,6 +253,51 @@ interface NamingConsistencyReport {
 | `inconsistencies` | `NamingInconsistency[]` | Each entry is one function/class name whose naming-case style (`detectedStyle`) doesn't match the dominant style computed for its `(language, kind)` group (`dominantStyle`) — e.g. a lone `snake_case` function name (`detectedStyle`) amid a `camelCase`-dominated (`dominantStyle`) group of TS functions. Empty if no outlier was found, or if no `(language, kind)` group had enough non-ambiguous names to compute a dominant style at all (see `dominantStyleByGroup` below). |
 | `dominantStyleByGroup` | `Record<string, string>` | Maps a `"<language>:<kind>"` group key (e.g. `"ts:function"`, `"python:class"`) to the dominant naming-case style computed for that group. A group is absent from this map entirely if it had fewer than 2 non-ambiguous names to establish a dominant style from — there being no entry for a group is not itself a finding. |
 
+## `DuplicationReport`
+
+`DuplicationReport` (and the nested `DuplicateGroup`/`DuplicateFunctionRef`) are defined in and exported from `src/duplication.ts` — treat that file as the authoritative shape if this table and the source ever disagree. This is computed once by `findDuplicateGroups(graph)` across the *whole* analyzed codebase, independent of `--topN` — same as `namingConsistency`, it is not scoped to top-risk files.
+
+```typescript
+interface DuplicateFunctionRef {
+  name: string;
+  fileId: string;
+}
+
+interface DuplicateGroup {
+  bodyHash: string;
+  functions: DuplicateFunctionRef[];
+}
+
+interface DuplicationReport {
+  groups: DuplicateGroup[];
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `groups` | `DuplicateGroup[]` | Each entry is one group of functions sharing the same normalized structural body hash (`bodyHash`) across 2+ distinct files — identifiers and literal content are collapsed before hashing, so this catches a function copied and renamed, not just verbatim text matches. Same-file duplication is excluded (this feature is specifically about duplication *across* files). Empty if no function's body hash was shared by 2+ functions in distinct files. |
+| `groups[].bodyHash` | `string` | The shared structural hash all functions in this group have in common. Not meaningful on its own outside this report — it's an internal grouping key, not a stable public identifier. |
+| `groups[].functions` | `DuplicateFunctionRef[]` | The function name and containing file id for each function in this duplicate group. |
+
+## `DeadFileReport`
+
+`DeadFileReport` (and the nested `DeadFileCandidate`) are defined in and exported from `src/deadcode.ts` — treat that file as the authoritative shape if this table and the source ever disagree. This is computed once by `computeDeadFiles(graph)` across the *whole* analyzed codebase, independent of `--topN` — same as `namingConsistency`, it is not scoped to top-risk files.
+
+```typescript
+interface DeadFileCandidate {
+  fileId: string;
+  path: string;
+}
+
+interface DeadFileReport {
+  candidates: DeadFileCandidate[];
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `candidates` | `DeadFileCandidate[]` | Each entry is a file with zero detected `IMPORTS` edges pointing to it, that also doesn't look like a likely entry point (by basename: `index`, `main`, `cli`, `app`, `server`, `__main__`) or a test file. This is a heuristic based on statically resolved imports within the analyzed repo — it cannot see dynamic imports, a file invoked only from a CLI entry point under some other basename, or wiring declared in a non-JS/TS/Go/Python manifest (a known, documented gap, not a silent one). Empty if no file matched all three conditions. |
+
 ## `report` field structure
 
 `report` is a single markdown string containing exactly 5 fixed section headings, in order:
@@ -285,13 +334,24 @@ Version 5 is additive only, and again still a version bump per the stability pol
 
 This same phase also added a per-top-risk-file test-quality signal (`testCaseCount` / `hasTestAssertions`, computed by the new `computeTestQualitySignal` in `src/testquality.ts`, sourced from each top-risk file's matching test file rather than the file's own source). **This is not part of the JSON schema and has no version-bump implication** — it lives on the internal `TopRiskFile` type (`src/summarizer.ts`), which was never part of `ArchieJsonOutput` to begin with (`ContextPack.topRiskFiles` is pipeline-internal data used to build the prompt sent to the model, not exposed in this JSON output today). If you're looking for `testCaseCount` in `archie analyze --json` output, it isn't there — it only affects what the model sees when writing `report`.
 
+## Version 6 changes
+
+Version 6 is additive only, and again still a version bump per the stability policy below:
+
+- **`duplication`** — exposes cross-file duplicate-function groups (e.g. the same function shape, modulo renamed identifiers and literals, copy-pasted into two different files), computed by the new `findDuplicateGroups` (`src/duplication.ts`) and threaded through `PipelineResult` (`src/index.ts`) into this JSON output. Previously there was no cross-file duplication signal anywhere in Archie's pipeline or output — this is new coverage, not a relocation of an existing field.
+- **`deadFiles`** — exposes files with no detected importers (and that don't look like an entry point or test file by name), computed by the new `computeDeadFiles` (`src/deadcode.ts`) and threaded through `PipelineResult` into this JSON output. Previously there was no dead-file signal anywhere in Archie's pipeline or output.
+
+Both `duplication` and `deadFiles` are whole-codebase signals computed once per run, same as `namingConsistency` in version 5 — they are populated the same way regardless of whether the run's Context Pack ended up in `top-n-detail` or `cluster-summary` mode.
+
+This same phase also added a per-top-risk-file magic-number signal (`magicNumbers`, computed by the tree-sitter magic-number extraction in `src/parser.ts`, sourced from each top-risk file's own `FileNode.magicNumbers`). **This is not part of the JSON schema and has no version-bump implication**, for the same reason `testCaseCount`/`hasTestAssertions` weren't in version 5 — it lives on the internal `TopRiskFile` type (`src/summarizer.ts`), which was never part of `ArchieJsonOutput`. If you're looking for `magicNumbers` (or a `magicNumberCount`) in `archie analyze --json` output, it isn't there — it only affects what the model sees when writing `report`.
+
 ## Stability
 
-This is schema **version 5**. The `version` field will be incremented whenever a field is added, removed, renamed, or changes meaning in a way that could break an existing consumer. Consumers should:
+This is schema **version 6**. The `version` field will be incremented whenever a field is added, removed, renamed, or changes meaning in a way that could break an existing consumer. Consumers should:
 
 - Check `version` before parsing.
 - Fail loudly (rather than silently guessing) if `version` is not a value they understand — do not assume forward or backward compatibility across versions.
 
 ## Known consumers
 
-- `scripts/post-pr-comment.mjs` — the GitHub Action PR-comment script. Runs `archie analyze . --diff <ref> --json`, parses stdout, and reads `.report` (splitting it into sections by the fixed headings above), `.diff.scoped` / `.diff.changedFileCount`, and `.graph.fileCount` / `.graph.edgeCount` to build a PR comment body. As of schema version 5 it does not yet read `.risks`, `.scenarios`, `.diff.changedFiles`, `.history`, `.qualityWarnings`, or `.namingConsistency` — a follow-up task will update it to consume structured `.risks`/`.scenarios` directly (instead of parsing them out of `.report`), to use `.diff.changedFiles` to post inline, per-file review comments, and to surface `.history` / `.qualityWarnings` / `.namingConsistency` in the PR comment body.
+- `scripts/post-pr-comment.mjs` — the GitHub Action PR-comment script. Runs `archie analyze . --diff <ref> --json`, parses stdout, and reads `.report` (splitting it into sections by the fixed headings above), `.diff.scoped` / `.diff.changedFileCount`, and `.graph.fileCount` / `.graph.edgeCount` to build a PR comment body. As of schema version 6 it does not yet read `.risks`, `.scenarios`, `.diff.changedFiles`, `.history`, `.qualityWarnings`, `.namingConsistency`, `.duplication`, or `.deadFiles` — a follow-up task will update it to consume structured `.risks`/`.scenarios` directly (instead of parsing them out of `.report`), to use `.diff.changedFiles` to post inline, per-file review comments, and to surface `.history` / `.qualityWarnings` / `.namingConsistency` / `.duplication` / `.deadFiles` in the PR comment body.

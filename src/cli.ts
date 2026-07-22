@@ -11,6 +11,8 @@ import type { GraphNode, Edge } from "./types.js";
 import type { RiskFinding, ScenarioFinding, QualityWarning } from "./reasoning.js";
 import type { HistoryEntry } from "./history.js";
 import type { NamingConsistencyReport } from "./consistency.js";
+import type { DuplicationReport } from "./duplication.js";
+import type { DeadFileReport } from "./deadcode.js";
 
 /**
  * The shape of `archie analyze --json` stdout output. This is a real
@@ -20,7 +22,7 @@ import type { NamingConsistencyReport } from "./consistency.js";
  * or changes meaning — see docs/json-output-schema.md.
  */
 export interface ArchieJsonOutput {
-  version: 5;
+  version: 6;
   repoPath: string;
   topN: number;
   report: string;
@@ -46,6 +48,16 @@ export interface ArchieJsonOutput {
   // NamingInconsistency shapes. New in schema version 5, see
   // docs/json-output-schema.md.
   namingConsistency: NamingConsistencyReport;
+  // Whole-codebase cross-file duplicate-function groups, computed once per
+  // run -- see src/duplication.ts for the authoritative DuplicationReport/
+  // DuplicateGroup shapes. New in schema version 6, see
+  // docs/json-output-schema.md.
+  duplication: DuplicationReport;
+  // Whole-codebase dead-file candidates (files with no detected importers),
+  // computed once per run -- see src/deadcode.ts for the authoritative
+  // DeadFileReport/DeadFileCandidate shapes. New in schema version 6, see
+  // docs/json-output-schema.md.
+  deadFiles: DeadFileReport;
 }
 
 const program = new Command();
@@ -138,7 +150,7 @@ program
           if (opts.json) {
             const changedFiles = (diffScope.files ?? []).map((f) => path.relative(resolvedRepo, f));
             const output: ArchieJsonOutput = {
-              version: 5,
+              version: 6,
               repoPath: resolvedRepo,
               topN: Number.parseInt(opts.topN, 10),
               report,
@@ -160,6 +172,8 @@ program
                 edges: graph.edges,
               },
               namingConsistency: result.namingConsistency,
+              duplication: result.duplication,
+              deadFiles: result.deadFiles,
             };
             console.log(JSON.stringify(output, null, 2));
             return report;

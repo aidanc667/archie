@@ -351,7 +351,13 @@ export function buildGraph(
     const fileId = fileIdByAbsPath.get(absPath)!;
     const relPath = path.relative(root, absPath);
 
-    const fileNode: FileNode = { kind: "file", id: fileId, path: relPath, loc: entry.loc };
+    const fileNode: FileNode = {
+      kind: "file",
+      id: fileId,
+      path: relPath,
+      loc: entry.loc,
+      magicNumbers: entry.parsed.magicNumbers,
+    };
     nodes.push(fileNode);
 
     for (const fn of entry.parsed.functions) {
