@@ -12,6 +12,7 @@ import {
   MAGIC_NUMBER_GROUNDING_RULE,
   DUPLICATION_GROUNDING_RULE,
   DEAD_FILE_GROUNDING_RULE,
+  SECURITY_GROUNDING_RULE,
 } from "./reasoning.js";
 import type { ContextPack } from "./summarizer.js";
 
@@ -165,6 +166,7 @@ function makeFakeClient(overrides: {
 const EMPTY_NAMING_CONSISTENCY = { inconsistencies: [], dominantStyleByGroup: {} };
 const EMPTY_DUPLICATION = { groups: [] };
 const EMPTY_DEAD_FILES = { candidates: [] };
+const EMPTY_SECURITY = { secrets: [], dangerousSinks: [] };
 
 const BASE_PACK: ContextPack = {
   mode: "top-n-detail",
@@ -175,6 +177,7 @@ const BASE_PACK: ContextPack = {
   namingConsistency: EMPTY_NAMING_CONSISTENCY,
   duplication: EMPTY_DUPLICATION,
   deadFiles: EMPTY_DEAD_FILES,
+  security: EMPTY_SECURITY,
 };
 
 describe("generateReport", () => {
@@ -749,6 +752,7 @@ describe("generateReport", () => {
       namingConsistency: EMPTY_NAMING_CONSISTENCY,
       duplication: EMPTY_DUPLICATION,
       deadFiles: EMPTY_DEAD_FILES,
+      security: EMPTY_SECURITY,
     };
 
     const { report: result } = await generateReport(fakeClient as any, pack);
@@ -769,6 +773,7 @@ describe("generateReport", () => {
       namingConsistency: EMPTY_NAMING_CONSISTENCY,
       duplication: EMPTY_DUPLICATION,
       deadFiles: EMPTY_DEAD_FILES,
+      security: EMPTY_SECURITY,
     };
 
     const { report: result } = await generateReport(fakeClient as any, pack);
@@ -817,6 +822,7 @@ describe("generateReport", () => {
       namingConsistency: EMPTY_NAMING_CONSISTENCY,
       duplication: EMPTY_DUPLICATION,
       deadFiles: EMPTY_DEAD_FILES,
+      security: EMPTY_SECURITY,
     };
 
     const { report: result } = await generateReport(fakeClient as any, pack);
@@ -1216,6 +1222,72 @@ describe("DEAD_FILE_GROUNDING_RULE", () => {
     expect(calls[1][0].system).toContain("deadFiles.candidates");
     expect(calls[2][0].system).toContain("deadFiles.candidates");
     expect(calls[3][0].system).toContain("deadFiles.candidates");
+  });
+});
+
+// Required test (Wave 2): mirrors NAMING_CONSISTENCY_RULE/DUPLICATION_GROUNDING_RULE/
+// DEAD_FILE_GROUNDING_RULE's direct-string-assertion tests above, plus two
+// assertions specific to this rule: (1) it must explicitly forbid inventing,
+// guessing, or reconstructing a secret's actual value (the hard safety
+// constraint carried over from src/security.ts's SecretFinding shape), and
+// (2) it must state the Critical-severity escalation for Section 2 -- unlike
+// every other whole-codebase rule, a non-empty finding here is not optional
+// System Summary color, it's a mandatory Section 2 entry.
+describe("SECURITY_GROUNDING_RULE", () => {
+  it("instructs the model to describe a security finding only by ruleId and location", () => {
+    expect(SECURITY_GROUNDING_RULE).toMatch(/security\.secrets/);
+    expect(SECURITY_GROUNDING_RULE).toMatch(/security\.dangerousSinks/);
+    expect(SECURITY_GROUNDING_RULE.toLowerCase()).toMatch(/ruleid/);
+  });
+
+  it("explicitly forbids inventing, guessing, or reconstructing a secret's actual value", () => {
+    expect(SECURITY_GROUNDING_RULE.toLowerCase()).toMatch(/never (invent|guess|reconstruct)/);
+  });
+
+  it("forbids saying anything about secrets or dangerous sinks when both arrays are empty", () => {
+    expect(SECURITY_GROUNDING_RULE.toLowerCase()).toMatch(/is empty/);
+    expect(SECURITY_GROUNDING_RULE.toLowerCase()).toMatch(/fabrication/);
+  });
+
+  it("requires escalating a non-empty finding to a Critical-severity risk in Section 2, even outside topRiskFiles", () => {
+    expect(SECURITY_GROUNDING_RULE).toMatch(/Critical/);
+    expect(SECURITY_GROUNDING_RULE.toLowerCase()).toMatch(/topriskfiles/);
+  });
+
+  it("is included in the system prompt sent to Claude for all four passes", async () => {
+    const fakeClient = makeFakeClient();
+
+    await generateReport(fakeClient as any, BASE_PACK);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    expect(calls).toHaveLength(4);
+    expect(calls[0][0].system).toContain("security.secrets");
+    expect(calls[1][0].system).toContain("security.secrets");
+    expect(calls[2][0].system).toContain("security.secrets");
+    expect(calls[3][0].system).toContain("security.secrets");
+  });
+
+  // The escalation instruction must appear in BOTH the grounding rule AND
+  // Section 2's own prompt prose -- same pattern this codebase already used
+  // for the namingConsistency mention in Section 1 (see NAMING_CONSISTENCY_RULE's
+  // own test above). This checks for wording specific to Section 2's inline
+  // instruction, distinct from the grounding rule's own phrasing, so this
+  // test can't pass merely because the grounding rule text is present.
+  // Section 2's prose lives only in SYSTEM_PROMPT itself (calls[0]=risks,
+  // calls[1]=scenarios, calls[2]=remaining sections all use it) -- unlike
+  // the other three, QUALITY_CHECK_SYSTEM_PROMPT (calls[3]) deliberately
+  // audits only Sections 1/4/5, never Section 2, so it never carries
+  // Section 2's own inline prose and is correctly excluded from this check.
+  it("also states the Critical-severity escalation instruction directly in Section 2's own prompt text", async () => {
+    const fakeClient = makeFakeClient();
+
+    await generateReport(fakeClient as any, BASE_PACK);
+
+    const calls = fakeClient.messages.create.mock.calls;
+    expect(calls).toHaveLength(4);
+    for (let i = 0; i < 3; i++) {
+      expect(calls[i][0].system).toContain("report at least one Critical severity risk here");
+    }
   });
 });
 

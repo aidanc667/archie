@@ -10,6 +10,36 @@ import type { DuplicationReport } from "./duplication.js";
 import type { DeadFileReport } from "./deadcode.js";
 import type { MagicNumberOccurrence } from "./parser.js";
 
+// A single security-relevant finding, deliberately identical in shape for
+// both a leaked-secret hit and a dangerous-sink hit: `file`+`line`+`ruleId`
+// is enough for the model to cite either kind of finding by exact location,
+// and keeping one shape (instead of two subtly different ones) means the
+// downstream grounding rule and prompt instructions only have to describe
+// one thing. `hasDynamicArgument` is only ever set for a dangerousSinks
+// entry (a dynamically-constructed argument to eval/exec/etc. is a real
+// injection risk; a literal argument is merely a discouraged pattern) --
+// left undefined for secrets, where it has no meaning.
+//
+// SAFETY: this type must NEVER grow a field that could carry a secret's
+// actual matched text (a snippet, a masked preview, a hash of it). `ruleId`
+// names which detection rule fired (e.g. "aws-access-key") and `line`
+// pinpoints where -- that is deliberately the entire ceiling. See
+// src/security.ts's own header comment for why: Archie's report is posted
+// as a public/org-visible GitHub comment, so any field here that carried
+// even a fragment of a real secret would turn this feature into the exact
+// leak mechanism it exists to catch.
+export interface SecurityFinding {
+  file: string;
+  line: number;
+  ruleId: string; // secrets: "aws-access-key" etc; dangerousSinks: the sink name, e.g. "eval", "execSync"
+  hasDynamicArgument?: boolean; // only ever set for a dangerousSinks finding
+}
+
+export interface SecurityReport {
+  secrets: SecurityFinding[];
+  dangerousSinks: SecurityFinding[];
+}
+
 export interface ContextPackOptions {
   topN: number;
   maxTokens: number;
@@ -105,6 +135,10 @@ export interface ContextPack {
   // top-n-detail and cluster-summary modes -- unlike topRiskFiles, which is
   // empty in cluster-summary mode.
   deadFiles: DeadFileReport;
+  // A whole-codebase signal (not scoped to top-N), so it belongs in both
+  // top-n-detail and cluster-summary modes -- unlike topRiskFiles, which is
+  // empty in cluster-summary mode.
+  security: SecurityReport;
 }
 
 // Rough token estimate: ~4 characters per token. This measures the length of the
@@ -207,6 +241,7 @@ export function buildContextPack(
   namingConsistency: NamingConsistencyReport,
   duplication: DuplicationReport,
   deadFiles: DeadFileReport,
+  security: SecurityReport,
   dependencies?: Record<string, string>
 ): ContextPack {
   const paths = pathByFileId(graph);
@@ -271,6 +306,7 @@ export function buildContextPack(
       namingConsistency,
       duplication,
       deadFiles,
+      security,
     };
 
     if (estimateTokens(candidate) <= options.maxTokens) {
@@ -291,5 +327,6 @@ export function buildContextPack(
     namingConsistency,
     duplication,
     deadFiles,
+    security,
   };
 }

@@ -11,6 +11,7 @@ import type { RiskScore } from "./metrics.js";
 import type { NamingConsistencyReport } from "./consistency.js";
 import type { DuplicationReport } from "./duplication.js";
 import type { DeadFileReport } from "./deadcode.js";
+import type { SecurityReport } from "./summarizer.js";
 
 // Wraps the real computeTestQualitySignal in a spy so tests can assert
 // exactly which (source, language) pair it was called with -- or that it was
@@ -32,6 +33,7 @@ const EMPTY_NAMING_CONSISTENCY: NamingConsistencyReport = {
 
 const EMPTY_DUPLICATION: DuplicationReport = { groups: [] };
 const EMPTY_DEAD_FILES: DeadFileReport = { candidates: [] };
+const EMPTY_SECURITY: SecurityReport = { secrets: [], dangerousSinks: [] };
 
 beforeEach(() => {
   vi.mocked(testqualityModule.computeTestQualitySignal).mockClear();
@@ -78,7 +80,7 @@ function makeThreeFileScores(): RiskScore[] {
 
 describe("buildContextPack", () => {
   it("includes top-N risk files with full metrics and a graph snapshot", () => {
-    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 50000 }, EMPTY_NAMING_CONSISTENCY, EMPTY_DUPLICATION, EMPTY_DEAD_FILES);
+    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 50000 }, EMPTY_NAMING_CONSISTENCY, EMPTY_DUPLICATION, EMPTY_DEAD_FILES, EMPTY_SECURITY);
 
     expect(pack.topRiskFiles).toHaveLength(1);
     expect(pack.topRiskFiles[0].path).toBe("a.ts");
@@ -101,7 +103,8 @@ describe("buildContextPack", () => {
       },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     // a.ts has the higher risk score (0.9 vs 0.1) and would normally win the
@@ -115,7 +118,7 @@ describe("buildContextPack", () => {
   });
 
   it("falls back to cluster-summary mode when detail set exceeds token budget", () => {
-    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 1 }, EMPTY_NAMING_CONSISTENCY, EMPTY_DUPLICATION, EMPTY_DEAD_FILES);
+    const pack = buildContextPack(makeGraph(), makeScores(), new Map(), { topN: 1, maxTokens: 1 }, EMPTY_NAMING_CONSISTENCY, EMPTY_DUPLICATION, EMPTY_DEAD_FILES, EMPTY_SECURITY);
 
     expect(pack.mode).toBe("cluster-summary");
     expect(pack.topRiskFiles).toEqual([]);
@@ -134,7 +137,8 @@ describe("buildContextPack", () => {
       { topN: 3, maxTokens: 200 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     expect(pack.mode).toBe("top-n-detail");
@@ -155,7 +159,8 @@ describe("buildContextPack", () => {
       { topN: 1, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     expect(pack.topRiskFiles).toHaveLength(1);
@@ -173,7 +178,8 @@ describe("buildContextPack", () => {
       { topN: 1, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     expect(pack.topRiskFiles).toHaveLength(1);
@@ -203,7 +209,8 @@ describe("buildContextPack", () => {
       { topN: 2, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     const fileA = pack.topRiskFiles.find((f) => f.path === "a.ts");
@@ -225,7 +232,8 @@ describe("buildContextPack", () => {
       { topN: 2, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     const fileA = pack.topRiskFiles.find((f) => f.path === "a.ts");
@@ -266,7 +274,8 @@ describe("buildContextPack", () => {
       { topN: 1, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     expect(pack.topRiskFiles[0].exportedSymbols.sort()).toEqual(["PublicClass", "publicFn"]);
@@ -304,7 +313,8 @@ describe("buildContextPack", () => {
       { topN: 5, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     const fileD = pack.topRiskFiles.find((f) => f.path === "d.ts");
@@ -327,6 +337,7 @@ describe("buildContextPack", () => {
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
       EMPTY_DEAD_FILES,
+      EMPTY_SECURITY,
       { next: "16.2.2", react: "19.0.0" }
     );
 
@@ -341,7 +352,8 @@ describe("buildContextPack", () => {
       { topN: 1, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     expect(pack.dependencies).toBeUndefined();
@@ -356,6 +368,7 @@ describe("buildContextPack", () => {
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
       EMPTY_DEAD_FILES,
+      EMPTY_SECURITY,
       { next: "16.2.2" }
     );
 
@@ -390,7 +403,8 @@ describe("buildContextPack", () => {
       { topN: 1, maxTokens: 50000 },
       expected,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     expect(pack.mode).toBe("top-n-detail");
@@ -408,7 +422,8 @@ describe("buildContextPack", () => {
       { topN: 1, maxTokens: 1 },
       expected,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     expect(pack.mode).toBe("cluster-summary");
@@ -442,7 +457,8 @@ describe("buildContextPack", () => {
       { topN: 1, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       duplication,
-      deadFiles
+      deadFiles,
+      EMPTY_SECURITY
     );
 
     expect(pack.mode).toBe("top-n-detail");
@@ -473,12 +489,60 @@ describe("buildContextPack", () => {
       { topN: 1, maxTokens: 1 },
       EMPTY_NAMING_CONSISTENCY,
       duplication,
-      deadFiles
+      deadFiles,
+      EMPTY_SECURITY
     );
 
     expect(pack.mode).toBe("cluster-summary");
     expect(pack.duplication).toEqual(duplication);
     expect(pack.deadFiles).toEqual(deadFiles);
+  });
+
+  // Required test #1 (Wave 2): buildContextPack threads security through
+  // unchanged in top-n-detail mode -- same reasoning as namingConsistency/
+  // duplication/deadFiles above: this is a whole-codebase signal, computed
+  // once per run independent of --topN, so it belongs in the pack regardless
+  // of which files made the top-N cut.
+  it("populates security from the value passed in, in top-n-detail mode", () => {
+    const security: SecurityReport = {
+      secrets: [{ file: "a.ts", line: 5, ruleId: "aws-access-key" }],
+      dangerousSinks: [{ file: "b.ts", line: 12, ruleId: "eval", hasDynamicArgument: true }],
+    };
+
+    const pack = buildContextPack(
+      makeGraph(),
+      makeScores(),
+      new Map(),
+      { topN: 1, maxTokens: 50000 },
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES,
+      security
+    );
+
+    expect(pack.mode).toBe("top-n-detail");
+    expect(pack.security).toEqual(security);
+  });
+
+  it("populates security in the cluster-summary fallback too", () => {
+    const security: SecurityReport = {
+      secrets: [{ file: "a.ts", line: 5, ruleId: "aws-access-key" }],
+      dangerousSinks: [{ file: "b.ts", line: 12, ruleId: "eval", hasDynamicArgument: true }],
+    };
+
+    const pack = buildContextPack(
+      makeGraph(),
+      makeScores(),
+      new Map(),
+      { topN: 1, maxTokens: 1 },
+      EMPTY_NAMING_CONSISTENCY,
+      EMPTY_DUPLICATION,
+      EMPTY_DEAD_FILES,
+      security
+    );
+
+    expect(pack.mode).toBe("cluster-summary");
+    expect(pack.security).toEqual(security);
   });
 
   // Required test: a top-risk file's magicNumbers field is sourced from that
@@ -508,7 +572,8 @@ describe("buildContextPack", () => {
       { topN: 2, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     const fileA = pack.topRiskFiles.find((f) => f.path === "a.ts");
@@ -551,7 +616,8 @@ describe("buildContextPack", () => {
       { topN: 1, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     expect(pack.topRiskFiles[0].testCaseCount).toBe(2);
@@ -579,7 +645,8 @@ describe("buildContextPack", () => {
       { topN: 2, maxTokens: 50000 },
       EMPTY_NAMING_CONSISTENCY,
       EMPTY_DUPLICATION,
-      EMPTY_DEAD_FILES
+      EMPTY_DEAD_FILES,
+      EMPTY_SECURITY
     );
 
     expect(pack.topRiskFiles).toHaveLength(2);

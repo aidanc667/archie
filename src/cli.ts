@@ -13,6 +13,7 @@ import type { HistoryEntry } from "./history.js";
 import type { NamingConsistencyReport } from "./consistency.js";
 import type { DuplicationReport } from "./duplication.js";
 import type { DeadFileReport } from "./deadcode.js";
+import type { SecurityReport } from "./summarizer.js";
 
 /**
  * The shape of `archie analyze --json` stdout output. This is a real
@@ -22,7 +23,7 @@ import type { DeadFileReport } from "./deadcode.js";
  * or changes meaning — see docs/json-output-schema.md.
  */
 export interface ArchieJsonOutput {
-  version: 6;
+  version: 7;
   repoPath: string;
   topN: number;
   report: string;
@@ -58,6 +59,13 @@ export interface ArchieJsonOutput {
   // DeadFileReport/DeadFileCandidate shapes. New in schema version 6, see
   // docs/json-output-schema.md.
   deadFiles: DeadFileReport;
+  // Whole-codebase security findings (hardcoded-secret-shaped strings and
+  // dangerous dynamic-execution sinks), computed once per run -- see
+  // src/summarizer.ts for the authoritative SecurityReport/SecurityFinding
+  // shapes. New in schema version 7, see docs/json-output-schema.md.
+  // SAFETY: SecurityFinding is {file, line, ruleId} only -- a `secrets`
+  // entry never carries the actual matched secret text in any form.
+  security: SecurityReport;
 }
 
 const program = new Command();
@@ -150,7 +158,7 @@ program
           if (opts.json) {
             const changedFiles = (diffScope.files ?? []).map((f) => path.relative(resolvedRepo, f));
             const output: ArchieJsonOutput = {
-              version: 6,
+              version: 7,
               repoPath: resolvedRepo,
               topN: Number.parseInt(opts.topN, 10),
               report,
@@ -174,6 +182,7 @@ program
               namingConsistency: result.namingConsistency,
               duplication: result.duplication,
               deadFiles: result.deadFiles,
+              security: result.security,
             };
             console.log(JSON.stringify(output, null, 2));
             return report;

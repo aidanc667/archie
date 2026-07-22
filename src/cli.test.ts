@@ -311,7 +311,7 @@ describe("archie analyze --json output shape", () => {
   it("produces a JSON-serializable ArchieJsonOutput with the documented top-level keys", async () => {
     const repoPath = path.resolve("fixtures/parser-basic");
     const topN = 5;
-    const { report, graph, risks, scenarios, history, qualityWarnings, namingConsistency, duplication, deadFiles } = await runPipeline({
+    const { report, graph, risks, scenarios, history, qualityWarnings, namingConsistency, duplication, deadFiles, security } = await runPipeline({
       repoPath,
       topN,
       maxTokens: 50000,
@@ -320,7 +320,7 @@ describe("archie analyze --json output shape", () => {
 
     // Mirrors the `output` construction in the `--json` branch of src/cli.ts.
     const output: ArchieJsonOutput = {
-      version: 6,
+      version: 7,
       repoPath,
       topN,
       report,
@@ -339,10 +339,11 @@ describe("archie analyze --json output shape", () => {
       namingConsistency,
       duplication,
       deadFiles,
+      security,
     };
 
     const parsed = JSON.parse(JSON.stringify(output));
-    expect(parsed.version).toBe(6);
+    expect(parsed.version).toBe(7);
     expect(parsed).toHaveProperty("repoPath");
     expect(parsed).toHaveProperty("topN");
     expect(parsed).toHaveProperty("report");
@@ -359,6 +360,9 @@ describe("archie analyze --json output shape", () => {
     expect(Array.isArray(parsed.duplication.groups)).toBe(true);
     expect(parsed).toHaveProperty("deadFiles");
     expect(Array.isArray(parsed.deadFiles.candidates)).toBe(true);
+    expect(parsed).toHaveProperty("security");
+    expect(Array.isArray(parsed.security.secrets)).toBe(true);
+    expect(Array.isArray(parsed.security.dangerousSinks)).toBe(true);
     expect(Array.isArray(parsed.risks)).toBe(true);
     expect(parsed.risks[0]).toMatchObject({
       title: expect.any(String),
@@ -402,6 +406,59 @@ describe("archie analyze --json output shape", () => {
     expect(parsed.graph.edgeCount).toBe(graph.edges.length);
     expect(Array.isArray(parsed.graph.nodes)).toBe(true);
     expect(Array.isArray(parsed.graph.edges)).toBe(true);
+  });
+
+  // Required test (Wave 2) -- the most important test in this whole task: the
+  // real `archie analyze --json` output (ArchieJsonOutput, exactly as
+  // constructed by src/cli.ts's --json branch, posted verbatim as a public/
+  // org-visible GitHub comment) must NEVER contain the planted fixture
+  // secret's actual text anywhere in its serialized JSON string. fixtures/
+  // security/secrets.ts plants a real-shaped AWS-style key
+  // ("AKIAIOSFODNN7EXAMPLE") and a generic-secret-assignment value
+  // ("sk-test-abcdefghijklmnopqrstuvwxyz") specifically so this can be
+  // checked end-to-end -- SecurityFinding is {file, line, ruleId} only, and
+  // this test is what actually proves that constraint holds through the
+  // whole pipeline into the exact JSON a consumer would receive.
+  it("never leaks the planted fixture secret's actual text anywhere in the serialized ArchieJsonOutput", async () => {
+    const repoPath = path.resolve("fixtures/security");
+    const topN = 5;
+    const { report, graph, risks, scenarios, history, qualityWarnings, namingConsistency, duplication, deadFiles, security } = await runPipeline({
+      repoPath,
+      topN,
+      maxTokens: 50000,
+      generatePdf: false,
+    });
+
+    // Sanity: the detector actually found something to potentially leak --
+    // otherwise this test would trivially pass for the wrong reason.
+    expect(security.secrets.length).toBeGreaterThan(0);
+
+    const output: ArchieJsonOutput = {
+      version: 7,
+      repoPath,
+      topN,
+      report,
+      risks,
+      scenarios,
+      history,
+      qualityWarnings,
+      diff: { requested: false, scoped: false, changedFileCount: null, changedFiles: [] },
+      graph: {
+        fileCount: graph.nodes.filter((n) => n.kind === "file").length,
+        nodeCount: graph.nodes.length,
+        edgeCount: graph.edges.length,
+        nodes: graph.nodes,
+        edges: graph.edges,
+      },
+      namingConsistency,
+      duplication,
+      deadFiles,
+      security,
+    };
+
+    const serialized = JSON.stringify(output);
+    expect(serialized).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(serialized).not.toContain("sk-test-abcdefghijklmnopqrstuvwxyz");
   });
 
   // Regression coverage: diff.changedFiles must contain repo-relative paths

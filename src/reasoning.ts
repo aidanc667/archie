@@ -128,6 +128,35 @@ every file is in active use. An empty array only means the heuristic found no ca
 has been ruled out. A dead-code claim about a file that isn't in \`deadFiles.candidates\`, or one stated as a
 certainty rather than something to verify, is a fabrication, not a finding.`;
 
+export const SECURITY_GROUNDING_RULE = `Grounding rule for security findings: the Context Pack's
+\`security.secrets\` and \`security.dangerousSinks\` arrays list specific, statically-detected findings across
+the whole codebase. \`security.secrets\` entries are lines matching a hardcoded-credential-shaped pattern (an
+AWS-style access key, a PEM private-key header, or a generic api_key/secret/token/password assignment).
+\`security.dangerousSinks\` entries are call sites of a dynamic-execution primitive (eval, new Function,
+execSync, os.system, subprocess.*(shell=True), exec.Command("sh"/"bash", "-c", ...)) found in that file, with
+\`hasDynamicArgument\` indicating whether the argument was dynamically constructed (a real injection risk) or a
+plain literal (a discouraged pattern, but not itself an injection). Every entry is only \`{file, line, ruleId}\`
+(plus \`hasDynamicArgument\` for a dangerousSinks entry) — CRITICALLY, a \`security.secrets\` entry NEVER
+includes the actual matched secret text, only which detection rule fired (\`ruleId\`, e.g. "aws-access-key",
+"private-key-block", "generic-secret-assignment") and where. Describe a finding ONLY by its \`ruleId\` and
+location — e.g. "an AWS-access-key-shaped string was found in \`config.ts\` at line 12" or "a hardcoded
+credential-shaped assignment was found in \`db.ts\` at line 40" — you have not seen the actual value and must
+never invent, guess, or reconstruct what the secret's value might be, not even as an illustrative example or a
+plausible-looking placeholder. If \`security.secrets\` is empty, say nothing about hardcoded secrets at all;
+if \`security.dangerousSinks\` is empty, say nothing about dangerous sinks at all — an empty array only means
+this run's heuristic found no candidate, not that the codebase has been verified secret-free or
+injection-free. A security claim
+not backed by a real entry in \`security.secrets\`/\`security.dangerousSinks\`, or one that guesses at a
+secret's actual value, is a fabrication, not a finding.
+
+Unlike every other whole-codebase signal above, a non-empty \`security.secrets\` or \`security.dangerousSinks\`
+array is not optional color for the System Summary — it changes what Section 2 ("Top 5 Architectural Risks")
+MUST contain. If either array has at least one entry, Section 2 MUST include at least one Critical-severity
+risk citing that finding directly by file, line, and ruleId, even if that file does not appear in
+\`topRiskFiles\` at all: a leaked secret or a shell-injection sink is critical regardless of the file's
+complexity or fan-in score, and this deliberately overrides the normal expectation that Section 2's risks are
+sourced from \`topRiskFiles\`.`;
+
 const SYSTEM_PROMPT = `You are a Staff Engineer writing a formal architecture review for a software engineering team.
 You will be given a Context Pack: a system summary, top-risk files with full source code and metrics
 (complexity, fan-in, LOC, dependency depth, hasTests, testCaseCount, hasTestAssertions), a dependency graph
@@ -146,6 +175,7 @@ ${TEST_QUALITY_GROUNDING_RULE}
 ${MAGIC_NUMBER_GROUNDING_RULE}
 ${DUPLICATION_GROUNDING_RULE}
 ${DEAD_FILE_GROUNDING_RULE}
+${SECURITY_GROUNDING_RULE}
 - Every risk and finding must cite a specific file, function, or metric from the Context Pack.
   Format citations inline as \`filename.ts\` or \`filename.ts → functionName\`. No bare assertions.
 
@@ -185,6 +215,8 @@ For each risk, use this exact structure:
 **Evidence:** [Direct quote or paraphrase from the source code, or the specific metric, that confirms this risk. Never assert something you did not see in the pack.]
 
 Order risks from most to least severe. If fewer than 5 genuine risks exist, report only the ones you can evidence — do not pad.
+
+If the Context Pack's \`security.secrets\` or \`security.dangerousSinks\` array is non-empty, you MUST report at least one Critical severity risk here for that exact finding (cite \`file\`/\`line\`/\`ruleId\` — never the secret's actual value, see grounding rule above) even if its file never appears in \`topRiskFiles\` — a leaked secret or a shell-injection sink is critical regardless of complexity/fanIn, and this takes priority over the normal topRiskFiles-sourced risks if it means displacing a lower-severity one to stay within 5.
 
 ---
 
@@ -766,6 +798,7 @@ ${TEST_QUALITY_GROUNDING_RULE}
 ${MAGIC_NUMBER_GROUNDING_RULE}
 ${DUPLICATION_GROUNDING_RULE}
 ${DEAD_FILE_GROUNDING_RULE}
+${SECURITY_GROUNDING_RULE}
 
 Concretely, check for:
 (a) A version number that doesn't match the Context Pack's \`dependencies\` field.
@@ -787,6 +820,10 @@ Concretely, check for:
 (i) A dead-code/"appears unused" claim about a file that isn't in \`deadFiles.candidates\`, one stated
     as a certainty rather than something to verify, or any such claim at all when \`deadFiles.candidates\`
     is empty.
+(j) A security claim (a hardcoded secret or a dangerous dynamic-execution sink) that isn't backed by a
+    real entry in \`security.secrets\`/\`security.dangerousSinks\`, OR a claim that reproduces, guesses at,
+    or otherwise reconstructs an actual secret's value instead of describing it only by \`ruleId\` and
+    location -- the latter is a safety violation, not just an ungrounded claim, and must always be flagged.
 
 Only flag claims you can concretely trace back to a mismatch or absence in the Context Pack — do not
 flag stylistic issues, subjective judgment calls, or claims you merely find surprising. If you find

@@ -7,10 +7,11 @@ import { walkRepo } from "./walker.js";
 import { parseFile, computeComplexity } from "./parser.js";
 import { buildGraph, loadPathAliases, loadGoModuleName, type FileEntry } from "./graph.js";
 import { computeRiskScores } from "./metrics.js";
-import { buildContextPack, loadDependencies } from "./summarizer.js";
+import { buildContextPack, loadDependencies, type SecurityReport } from "./summarizer.js";
 import { computeNamingConsistency, type NamingConsistencyReport } from "./consistency.js";
 import { findDuplicateGroups, type DuplicationReport } from "./duplication.js";
 import { computeDeadFiles, type DeadFileReport } from "./deadcode.js";
+import { detectHardcodedSecrets } from "./security.js";
 import {
   generateReport,
   generateSimplifiedSummary,
@@ -81,6 +82,51 @@ export interface PipelineResult {
   // importers), computed once per run directly from the graph --
   // independent of which files made the top-N cut.
   deadFiles: DeadFileReport;
+  // Whole-codebase security signal (hardcoded-secret-shaped strings and
+  // dangerous dynamic-execution sinks), computed once per run directly from
+  // the graph and each file's source -- independent of which files made the
+  // top-N cut. See buildSecurityReport below and the SAFETY note on
+  // SecurityFinding (src/summarizer.ts): this NEVER carries an actual
+  // matched secret's text, only which rule fired and where.
+  security: SecurityReport;
+}
+
+// Aggregates the two Wave-1 detectors (parser.ts's dangerous-sink extraction,
+// already wired onto FileNode.dangerousSinks by graph.ts; security.ts's
+// detectHardcodedSecrets, a pure regex scan not yet run against anything)
+// into one whole-repo SecurityReport. Exported (unlike most of this file's
+// other pipeline-internal steps) so it's directly unit-testable against a
+// hand-constructed graph -- in particular the "FileNode.dangerousSinks is
+// undefined" case, which a real parseFile run never actually produces (it
+// always sets a real array, even an empty one) but which older-shaped or
+// hand-built graph fixtures can still hit, same fail-open concern as
+// magicNumbers elsewhere in this codebase.
+export function buildSecurityReport(
+  graph: CodeGraph,
+  sourceByPath: Map<string, string>
+): SecurityReport {
+  const dangerousSinks: SecurityReport["dangerousSinks"] = [];
+  const secrets: SecurityReport["secrets"] = [];
+
+  for (const node of graph.nodes) {
+    if (node.kind !== "file") continue;
+
+    for (const sink of node.dangerousSinks ?? []) {
+      dangerousSinks.push({
+        file: node.path,
+        line: sink.line,
+        ruleId: sink.sink,
+        hasDynamicArgument: sink.hasDynamicArgument,
+      });
+    }
+
+    const source = sourceByPath.get(node.id) ?? "";
+    for (const finding of detectHardcodedSecrets(source)) {
+      secrets.push({ file: node.path, line: finding.line, ruleId: finding.ruleId });
+    }
+  }
+
+  return { secrets, dangerousSinks };
 }
 
 export async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
@@ -153,6 +199,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const namingConsistency = computeNamingConsistency(graph);
   const duplication = findDuplicateGroups(graph);
   const deadFiles = computeDeadFiles(graph);
+  const security = buildSecurityReport(graph, sourceByPath);
   const scores = computeRiskScores(graph, complexityByFile);
 
   const restrictToFileIds =
@@ -168,6 +215,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     namingConsistency,
     duplication,
     deadFiles,
+    security,
     dependencies
   );
 
@@ -259,5 +307,6 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     namingConsistency,
     duplication,
     deadFiles,
+    security,
   };
 }

@@ -3,9 +3,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import path from "node:path";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { runPipeline } from "./index.js";
+import { runPipeline, buildSecurityReport } from "./index.js";
 import { findDuplicateGroups } from "./duplication.js";
 import { computeDeadFiles } from "./deadcode.js";
+import { detectHardcodedSecrets } from "./security.js";
+import type { CodeGraph } from "./types.js";
 
 const REQUIRED_HEADINGS = [
   "1. System Summary",
@@ -135,6 +137,61 @@ vi.mock("@anthropic-ai/sdk", () => {
   };
 });
 
+// Required test (Wave 2): buildSecurityReport is a pure aggregation function
+// over a CodeGraph + per-file source map, unit-tested directly (not just
+// through the full runPipeline) because a hand-constructed graph node can
+// exercise the "no dangerousSinks field at all" case that a real parsed
+// FileNode never produces (parser.ts always sets dangerousSinks to a real
+// array, even an empty one, for any file it actually parses). Mirrors the
+// fail-open convention this codebase already uses for magicNumbers
+// (`?? []`), never crashing on an older-shaped or hand-built FileNode.
+describe("buildSecurityReport", () => {
+  it("aggregates every file's FileNode.dangerousSinks, treating a missing field as [] rather than crashing", () => {
+    const graph: CodeGraph = {
+      nodes: [
+        {
+          kind: "file",
+          id: "file:a.ts",
+          path: "a.ts",
+          loc: 10,
+          dangerousSinks: [{ sink: "eval", line: 3, hasDynamicArgument: true }],
+        },
+        { kind: "file", id: "file:b.ts", path: "b.ts", loc: 10 }, // no dangerousSinks field at all
+      ],
+      edges: [],
+    };
+
+    const security = buildSecurityReport(graph, new Map());
+
+    expect(security.dangerousSinks).toEqual([
+      { file: "a.ts", line: 3, ruleId: "eval", hasDynamicArgument: true },
+    ]);
+  });
+
+  it("computes security.secrets by running detectHardcodedSecrets against each file's own source", () => {
+    const source = 'const awsKey = "AKIAIOSFODNN7EXAMPLE";';
+    const graph: CodeGraph = {
+      nodes: [{ kind: "file", id: "file:a.ts", path: "a.ts", loc: 1 }],
+      edges: [],
+    };
+    const sourceByPath = new Map<string, string>([["file:a.ts", source]]);
+
+    const security = buildSecurityReport(graph, sourceByPath);
+
+    const expected = detectHardcodedSecrets(source).map((finding) => ({
+      file: "a.ts",
+      ...finding,
+    }));
+    expect(security.secrets).toEqual(expected);
+    expect(security.secrets.length).toBeGreaterThan(0); // sanity: this fixture actually has one
+  });
+
+  it("returns [] for both fields on a graph with no file nodes", () => {
+    const security = buildSecurityReport({ nodes: [], edges: [] }, new Map());
+    expect(security).toEqual({ secrets: [], dangerousSinks: [] });
+  });
+});
+
 describe("runPipeline with generatePdf", () => {
   const originalApiKey = process.env.ANTHROPIC_API_KEY;
 
@@ -229,6 +286,66 @@ describe("runPipeline with generatePdf", () => {
 
     expect(result.duplication).toEqual(findDuplicateGroups(result.graph));
     expect(result.deadFiles).toEqual(computeDeadFiles(result.graph));
+  });
+
+  // Required test (Wave 2): PipelineResult.security must be populated by
+  // runPipeline directly from the graph and per-file source, same shape
+  // buildSecurityReport itself produces -- a whole-codebase signal computed
+  // once, independent of generatePdf or any other option. fixtures/security
+  // is Wave 1's dedicated fixture directory (secrets.ts/py/go, sinks.ts/py/go)
+  // built specifically to exercise both detectors across all three languages.
+  it("populates result.security from the graph and source, matching buildSecurityReport's own output", async () => {
+    const repoPath = path.resolve("fixtures/security");
+    const result = await runPipeline({
+      repoPath,
+      topN: 5,
+      maxTokens: 50000,
+      generatePdf: false,
+    });
+
+    expect(result.security.dangerousSinks.length).toBeGreaterThan(0);
+    expect(result.security.secrets.length).toBeGreaterThan(0);
+
+    // Recompute independently from the graph's own FileNode.dangerousSinks
+    // fields to confirm runPipeline's aggregation isn't dropping or
+    // duplicating anything.
+    const expectedDangerousSinks = result.graph.nodes
+      .filter((n): n is Extract<typeof n, { kind: "file" }> => n.kind === "file")
+      .flatMap((n) =>
+        (n.dangerousSinks ?? []).map((s) => ({
+          file: n.path,
+          line: s.line,
+          ruleId: s.sink,
+          hasDynamicArgument: s.hasDynamicArgument,
+        }))
+      );
+    expect(result.security.dangerousSinks).toEqual(expectedDangerousSinks);
+  });
+
+  // Required test (Wave 2) -- the most important test in this whole task: a
+  // planted, real-shaped fake secret (fixtures/security/secrets.ts's AWS-style
+  // key and generic-secret-assignment value) must NEVER appear anywhere in
+  // the serialized PipelineResult, because SecurityFinding is {file, line,
+  // ruleId} only -- never the matched text. Archie's report is posted as a
+  // public/org-visible GitHub comment; if either planted value leaked through
+  // any field (report text, risks, security findings, anywhere), that would
+  // be a real, shipped secret leak, not just a failed assertion.
+  it("never leaks the planted fixture secret's actual text anywhere in the pipeline result", async () => {
+    const repoPath = path.resolve("fixtures/security");
+    const result = await runPipeline({
+      repoPath,
+      topN: 5,
+      maxTokens: 50000,
+      generatePdf: false,
+    });
+
+    // Sanity: the detector actually found something to potentially leak --
+    // otherwise this test would trivially pass for the wrong reason.
+    expect(result.security.secrets.length).toBeGreaterThan(0);
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(serialized).not.toContain("sk-test-abcdefghijklmnopqrstuvwxyz");
   });
 
   it("leaves simplifiedSummary undefined when generatePdf is false", async () => {

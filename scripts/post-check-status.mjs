@@ -15,7 +15,7 @@
 import { readFile } from "node:fs/promises";
 
 const CHECK_NAME = "Archie Architecture Review";
-const SUPPORTED_VERSION = 6;
+const SUPPORTED_VERSION = 7;
 
 // Higher rank == more severe. "none" is handled separately as a special case
 // (severity gating disabled) rather than given a rank.

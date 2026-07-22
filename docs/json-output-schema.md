@@ -14,7 +14,7 @@ The TypeScript type for this shape is `ArchieJsonOutput`, exported from `src/cli
 
 ```typescript
 interface ArchieJsonOutput {
-  version: 6;
+  version: 7;
   repoPath: string;
   topN: number;
   report: string;
@@ -38,12 +38,13 @@ interface ArchieJsonOutput {
   namingConsistency: NamingConsistencyReport;
   duplication: DuplicationReport;
   deadFiles: DeadFileReport;
+  security: SecurityReport;
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | `6` | Schema version of this JSON output, as a literal number. Currently always `6`. See "Stability" below. |
+| `version` | `7` | Schema version of this JSON output, as a literal number. Currently always `7`. See "Stability" below. |
 | `repoPath` | `string` | Absolute, resolved filesystem path to the repository that was analyzed (the `<path>` argument, resolved via `path.resolve`). |
 | `topN` | `number` | The `--topN` value used for this run (number of top-risk files included in report detail). Parsed from the CLI flag, default `10`. |
 | `report` | `string` | The full architecture report as a markdown string. See "Report field structure" below. |
@@ -64,6 +65,7 @@ interface ArchieJsonOutput {
 | `namingConsistency` | `NamingConsistencyReport` | Naming-case consistency findings computed once across the *whole* codebase (not scoped to top-risk files) — e.g. a lone `snake_case` function sitting among an otherwise `camelCase` group of the same (language, kind). See "`NamingConsistencyReport`" below. |
 | `duplication` | `DuplicationReport` | Cross-file duplicate-function groups computed once across the *whole* codebase (not scoped to top-risk files) — functions sharing the same normalized structural shape across 2+ distinct files. See "`DuplicationReport`" below. |
 | `deadFiles` | `DeadFileReport` | Dead-file candidates computed once across the *whole* codebase (not scoped to top-risk files) — files with no detected importers that also don't look like an entry point or test file. See "`DeadFileReport`" below. |
+| `security` | `SecurityReport` | Hardcoded-secret-shaped strings and dangerous dynamic-execution sinks, computed once across the *whole* codebase (not scoped to top-risk files). See "`SecurityReport`" below — **and note its safety property**: a secrets finding never carries the actual matched secret text, only which rule fired and where. |
 
 > **Warning — `nodeCount` is not a file count.** `graph.nodes` is a discriminated union of `FileNode`, `FunctionNode`, and `ClassNode`; `nodeCount` sums all three. An earlier version of `scripts/post-pr-comment.mjs` reported `graph.nodeCount` as "changed files" in the PR comment, which produced numbers like "345 changed files" on PRs that touched exactly one file — the real count was every function and class node in the (sometimes full-repo-fallback) graph, not files, and not scoped to the diff. Use `graph.fileCount` for a file count, and `diff.changedFileCount` for the actual diff-scoped count.
 
@@ -298,6 +300,35 @@ interface DeadFileReport {
 |---|---|---|
 | `candidates` | `DeadFileCandidate[]` | Each entry is a file with zero detected `IMPORTS` edges pointing to it, that also doesn't look like a likely entry point (by basename: `index`, `main`, `cli`, `app`, `server`, `__main__`) or a test file. This is a heuristic based on statically resolved imports within the analyzed repo — it cannot see dynamic imports, a file invoked only from a CLI entry point under some other basename, or wiring declared in a non-JS/TS/Go/Python manifest (a known, documented gap, not a silent one). Empty if no file matched all three conditions. |
 
+## `SecurityReport`
+
+`SecurityReport` (and the nested `SecurityFinding`) are defined in and exported from `src/summarizer.ts` — treat that file as the authoritative shape if this table and the source ever disagree. This is computed once per run in `src/index.ts` (aggregating every `FileNode.dangerousSinks`, set by `src/parser.ts`'s tree-sitter walk and wired on by `src/graph.ts`, plus a fresh run of `detectHardcodedSecrets` — `src/security.ts` — against each file's source) across the *whole* analyzed codebase, independent of `--topN` — same as `namingConsistency`/`duplication`/`deadFiles`, it is not scoped to top-risk files.
+
+```typescript
+interface SecurityFinding {
+  file: string;
+  line: number;
+  ruleId: string;
+  hasDynamicArgument?: boolean;
+}
+
+interface SecurityReport {
+  secrets: SecurityFinding[];
+  dangerousSinks: SecurityFinding[];
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `secrets` | `SecurityFinding[]` | Lines matching a hardcoded-credential-shaped pattern — an AWS-style access key (`ruleId: "aws-access-key"`), a PEM private-key header (`"private-key-block"`), or a generic `api_key`/`secret`/`token`/`password` assignment (`"generic-secret-assignment"`). Empty if the heuristic found no candidate in this run. |
+| `dangerousSinks` | `SecurityFinding[]` | Call sites of a dynamic-execution primitive — `eval`, `new Function`, `execSync` (TS/JS); `eval`, `exec`, `os.system`, `subprocess.*(shell=True)` (Python); `exec.Command("sh"/"bash", "-c", ...)` (Go). `ruleId` is the sink name (e.g. `"eval"`, `"execSync"`). Empty if none were found in this run. |
+| `*.file` | `string` | Path to the file the finding occurred in, relative to the analyzed repo root. |
+| `*.line` | `number` | 1-based line number the finding occurred on. |
+| `*.ruleId` | `string` | Which detection rule fired (see above) — never the matched text itself. |
+| `*.hasDynamicArgument` | `boolean \| undefined` | Only ever set on a `dangerousSinks` entry: whether the sink's argument was dynamically constructed (concatenation/interpolation/identifier — a real injection risk) versus a plain string literal (a discouraged pattern, but not itself an injection). Always `undefined` on a `secrets` entry, where it has no meaning. |
+
+> **Safety property — a `secrets` entry never carries the actual matched secret text.** `SecurityFinding` is deliberately `{file, line, ruleId}` (plus `hasDynamicArgument` for sinks) and nothing else. Archie's report is posted as a public/org-visible GitHub comment (PR comment, check status, or full-review issue); a finding that carried even a fragment of a real secret — a snippet, a masked preview, a hash of it — would turn this feature into the leak mechanism it exists to catch. This is a deliberate, load-bearing safety constraint of the schema, not an oversight or an omission to be "fixed" later — see "Version 7 changes" below.
+
 ## `report` field structure
 
 `report` is a single markdown string containing exactly 5 fixed section headings, in order:
@@ -345,13 +376,21 @@ Both `duplication` and `deadFiles` are whole-codebase signals computed once per 
 
 This same phase also added a per-top-risk-file magic-number signal (`magicNumbers`, computed by the tree-sitter magic-number extraction in `src/parser.ts`, sourced from each top-risk file's own `FileNode.magicNumbers`). **This is not part of the JSON schema and has no version-bump implication**, for the same reason `testCaseCount`/`hasTestAssertions` weren't in version 5 — it lives on the internal `TopRiskFile` type (`src/summarizer.ts`), which was never part of `ArchieJsonOutput`. If you're looking for `magicNumbers` (or a `magicNumberCount`) in `archie analyze --json` output, it isn't there — it only affects what the model sees when writing `report`.
 
+## Version 7 changes
+
+Version 7 is additive only, and again still a version bump per the stability policy below:
+
+- **`security`** — exposes whole-codebase security findings: hardcoded-secret-shaped strings (AWS-style access keys, PEM private-key headers, generic credential-shaped assignments) and dangerous dynamic-execution sinks (`eval`, `execSync`, `os.system`, `subprocess.*(shell=True)`, `exec.Command("sh"/"bash", "-c", ...)`, etc.), computed by the new `buildSecurityReport` (`src/index.ts`, aggregating `src/parser.ts`'s dangerous-sink detection via each `FileNode.dangerousSinks` and running `src/security.ts`'s `detectHardcodedSecrets` against each file's source) and threaded through `PipelineResult` into this JSON output. Previously there was no security signal anywhere in Archie's pipeline or output — this is new coverage, not a relocation of an existing field. Like `namingConsistency`/`duplication`/`deadFiles`, it is a whole-codebase signal, not scoped to `--topN`.
+
+**Safety property, not an oversight:** `SecurityFinding` (the entry shape for both `security.secrets` and `security.dangerousSinks`) is `{file, line, ruleId, hasDynamicArgument?}` — it intentionally excludes the matched secret text itself in every form (no snippet, no masked preview, no hash). This was a hard constraint from the moment `src/security.ts`'s `detectHardcodedSecrets` was first written (see that file's own header comment), carried through every layer added in this phase (`SecurityFinding`, `ContextPack.security`, `PipelineResult.security`, this field). Archie's report is posted as a public/org-visible GitHub comment (PR comment, check status, or full-review issue); a field that carried even a fragment of a real secret would turn this feature into the exact leak mechanism it exists to catch. **Any future change to `SecurityFinding` or `SecurityReport` must preserve this property** — do not add a field that could carry, reconstruct, or hint at a secret's actual value, no matter how useful it might seem for a consumer to "see more context."
+
 ## Stability
 
-This is schema **version 6**. The `version` field will be incremented whenever a field is added, removed, renamed, or changes meaning in a way that could break an existing consumer. Consumers should:
+This is schema **version 7**. The `version` field will be incremented whenever a field is added, removed, renamed, or changes meaning in a way that could break an existing consumer. Consumers should:
 
 - Check `version` before parsing.
 - Fail loudly (rather than silently guessing) if `version` is not a value they understand — do not assume forward or backward compatibility across versions.
 
 ## Known consumers
 
-- `scripts/post-pr-comment.mjs` — the GitHub Action PR-comment script. Runs `archie analyze . --diff <ref> --json`, parses stdout, and reads `.report` (splitting it into sections by the fixed headings above), `.diff.scoped` / `.diff.changedFileCount`, and `.graph.fileCount` / `.graph.edgeCount` to build a PR comment body. As of schema version 6 it does not yet read `.risks`, `.scenarios`, `.diff.changedFiles`, `.history`, `.qualityWarnings`, `.namingConsistency`, `.duplication`, or `.deadFiles` — a follow-up task will update it to consume structured `.risks`/`.scenarios` directly (instead of parsing them out of `.report`), to use `.diff.changedFiles` to post inline, per-file review comments, and to surface `.history` / `.qualityWarnings` / `.namingConsistency` / `.duplication` / `.deadFiles` in the PR comment body.
+- `scripts/post-pr-comment.mjs` — the GitHub Action PR-comment script. Runs `archie analyze . --diff <ref> --json`, parses stdout, and reads `.report` (splitting it into sections by the fixed headings above), `.diff.scoped` / `.diff.changedFileCount`, and `.graph.fileCount` / `.graph.edgeCount` to build a PR comment body. As of schema version 7 it does not yet read `.risks`, `.scenarios`, `.diff.changedFiles`, `.history`, `.qualityWarnings`, `.namingConsistency`, `.duplication`, `.deadFiles`, or `.security` — a follow-up task will update it to consume structured `.risks`/`.scenarios` directly (instead of parsing them out of `.report`), to use `.diff.changedFiles` to post inline, per-file review comments, and to surface `.history` / `.qualityWarnings` / `.namingConsistency` / `.duplication` / `.deadFiles` / `.security` in the PR comment body.

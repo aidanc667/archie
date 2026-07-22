@@ -17,7 +17,7 @@
 
 import { readFile } from "node:fs/promises";
 
-const SUPPORTED_VERSION = 6;
+const SUPPORTED_VERSION = 7;
 
 const LABEL_NAME = "archie-report";
 const LABEL_DESCRIPTION = "Persistent full-repo Archie architecture review";
