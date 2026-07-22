@@ -36,11 +36,18 @@ export interface MagicNumberOccurrence {
   line: number;
 }
 
+export interface DangerousSinkOccurrence {
+  sink: string; // e.g. "eval", "execSync", "os.system", "subprocess.run(shell=True)"
+  line: number;
+  hasDynamicArgument: boolean;
+}
+
 export interface ParsedFile {
   functions: ParsedFunction[];
   classes: ParsedClass[];
   imports: string[];
   magicNumbers: MagicNumberOccurrence[];
+  dangerousSinks: DangerousSinkOccurrence[];
 }
 
 let tsLanguage: Parser.Language | undefined;
@@ -121,7 +128,7 @@ export async function parseFile(filePath: string): Promise<ParsedFile> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[archie] Skipping unparseable file: ${filePath} — ${message}`);
-    return { functions: [], classes: [], imports: [], magicNumbers: [] };
+    return { functions: [], classes: [], imports: [], magicNumbers: [], dangerousSinks: [] };
   }
 }
 
@@ -302,6 +309,251 @@ function isGoConstSpecValue(node: Parser.SyntaxNode): boolean {
   return constSpec.parent?.type === "const_declaration";
 }
 
+// ---------------------------------------------------------------------------
+// Dangerous dynamic-execution sink detection, verified empirically against
+// real parse output from each grammar's .wasm the same way the magic-number
+// node types above were (throwaway probe script parsing each snippet below
+// and dumping the resulting tree, not assumed from memory of the grammar):
+//
+// - TS/JS: a bare call like `eval("x")` or `execSync(cmd)` parses as
+//   call_expression whose "function" field is a plain identifier node.
+//   `new Function(...)` is a DIFFERENT node type (new_expression, not
+//   call_expression) with NO "function" field at all -- its callee identifier
+//   is reachable via the "constructor" field instead (verified: calling
+//   .childForFieldName("function") on a new_expression returns undefined,
+//   .childForFieldName("constructor") returns the identifier). A member-style
+//   call like `cp.execSync(cmd)` gives call_expression a member_expression in
+//   its "function" field instead, with its own "object"/"property" fields
+//   (verified: property is a property_identifier node). Both call_expression
+//   and new_expression share the same "arguments" field shape: an `arguments`
+//   node whose anonymous "(", ",", ")" tokens sit alongside the real argument
+//   expressions as named children -- filtering to isNamed children in order
+//   gives the actual argument list.
+// - Python: `eval(x)`/`exec(x)` are `call` nodes whose "function" field is a
+//   bare identifier, same shape as TS/JS. `os.system(x)`/`subprocess.run(...)`
+//   are also `call` nodes, but "function" is instead an `attribute` node with
+//   its own "object"/"attribute" fields (verified: parsing `os.system(cmd)`
+//   gives attribute.childForFieldName("attribute").text === "system").
+//   Arguments live in an "argument_list" field; a `shell=True` keyword
+//   argument shows up as its own named child of type keyword_argument with
+//   "name"/"value" fields, distinguishable from the plain positional argument
+//   next to it (verified by parsing `subprocess.run(cmd, shell=True)`).
+// - Go: `exec.Command(...)` is a call_expression whose "function" field is a
+//   selector_expression with "operand"/"field" fields (verified: parsing
+//   `exec.Command("sh", "-c", cmd)` gives operand.text === "exec",
+//   field.text === "Command"). Arguments live in an "arguments" field (an
+//   argument_list node), same shape as the other two languages' argument
+//   lists above.
+function namedArguments(argsNode: Parser.SyntaxNode | null): Parser.SyntaxNode[] {
+  if (!argsNode) return [];
+  const result: Parser.SyntaxNode[] = [];
+  for (let i = 0; i < argsNode.childCount; i++) {
+    const child = argsNode.child(i);
+    if (child && child.isNamed) result.push(child);
+  }
+  return result;
+}
+
+// A TS/JS call's callee name for the purposes of this codebase's existing
+// "match by name, don't resolve imports" heuristic (the same discipline the
+// magic-number/const-exemption checks use elsewhere in this file): either a
+// bare identifier (`eval(...)`) or the rightmost name of a member expression
+// (`cp.execSync(...)`) -- both shapes verified empirically above.
+function tsJsCalleeName(functionField: Parser.SyntaxNode | null): string | undefined {
+  if (!functionField) return undefined;
+  if (functionField.type === "identifier") return functionField.text;
+  if (functionField.type === "member_expression") {
+    const property = functionField.childForFieldName("property");
+    return property?.type === "property_identifier" ? property.text : undefined;
+  }
+  return undefined;
+}
+
+const TS_EXEC_SHELL_SINK_NAMES = new Set(["execSync", "exec"]);
+
+// Whether a TS/JS argument node is anything other than a single, complete
+// plain string literal. A quoted "string" is never dynamic (no interpolation
+// is possible inside one). A template_string is only dynamic when it
+// actually CONTAINS a `${...}` interpolation -- verified empirically: parsing
+// a plain `` `git status` `` (no ${}) produces a template_string whose only
+// non-delimiter child is a string_fragment, with no template_substitution
+// node anywhere, so a template literal used exactly like a fixed string
+// isn't treated as a real injection risk just for using backticks. Anything
+// else (identifier, call_expression, binary `+` concatenation, ...) is
+// dynamic by definition -- it's not a literal at all.
+function hasDynamicArgumentTsJs(node: Parser.SyntaxNode): boolean {
+  if (node.type === "string") return false;
+  if (node.type === "template_string") {
+    for (let i = 0; i < node.childCount; i++) {
+      if (node.child(i)?.type === "template_substitution") return true;
+    }
+    return false;
+  }
+  return true;
+}
+
+const PY_EVAL_EXEC_NAMES = new Set(["eval", "exec"]);
+const PY_SHELL_ARG_SINK_NAMES = new Set(["run", "call", "Popen"]);
+
+// Same "is this a fixed literal" question as hasDynamicArgumentTsJs, but for
+// Python's grammar: plain strings and f-strings share the exact same "string"
+// node type (see PY_STRING_TYPES's comment earlier in this file), so an
+// f-string is only dynamic when it actually contains an `{expr}`
+// interpolation -- verified empirically: parsing f"cmd {x}" produces a
+// string node with an "interpolation" named child (itself wrapping the
+// identifier), while parsing a plain "plain" string produces no such child
+// at all. A non-string argument (identifier, call, ...) is dynamic by
+// definition.
+function hasDynamicArgumentPython(node: Parser.SyntaxNode): boolean {
+  if (node.type !== "string") return true;
+  for (let i = 0; i < node.childCount; i++) {
+    if (node.child(i)?.type === "interpolation") return true;
+  }
+  return false;
+}
+
+// Extracts the literal text of a Go string-literal argument node (both
+// interpreted "..." and raw `...` forms, stripped of their surrounding quote
+// characters), or undefined if the node isn't a string literal at all --
+// used both to recognize the literal "sh"/"bash"/"-c" arguments that make
+// exec.Command's shell-interpretation shape recognizable, and to decide
+// whether the shell-command argument itself is dynamic (any non-string-
+// literal argument is dynamic by definition, same reasoning as the TS/JS and
+// Python cases above; Go has no string interpolation syntax at all, so a
+// literal Go string argument is never dynamic the way a template/f-string
+// can be).
+function goStringLiteralValue(node: Parser.SyntaxNode): string | undefined {
+  if (!GO_STRING_TYPES.has(node.type)) return undefined;
+  return node.text.slice(1, -1);
+}
+
+function detectTsJsDangerousSink(
+  node: Parser.SyntaxNode
+): { sink: string; hasDynamicArgument: boolean } | undefined {
+  if (node.type === "call_expression") {
+    const callee = tsJsCalleeName(node.childForFieldName("function"));
+    if (!callee) return undefined;
+    // eval(...) is flagged for ANY call regardless of argument shape -- eval
+    // itself is the risk, not just a dynamic argument to it -- but
+    // hasDynamicArgument is still computed from the actual argument so a
+    // later severity pass can still tell `eval("fixed")` (discouraged) apart
+    // from `eval(userInput)` (an actual injection risk).
+    if (callee === "eval" || TS_EXEC_SHELL_SINK_NAMES.has(callee)) {
+      const args = namedArguments(node.childForFieldName("arguments"));
+      return {
+        sink: callee,
+        hasDynamicArgument: args.length === 0 ? true : hasDynamicArgumentTsJs(args[0]),
+      };
+    }
+    return undefined;
+  }
+  if (node.type === "new_expression") {
+    const constructorField = node.childForFieldName("constructor");
+    if (constructorField?.type === "identifier" && constructorField.text === "Function") {
+      const args = namedArguments(node.childForFieldName("arguments"));
+      return {
+        sink: "new Function",
+        hasDynamicArgument: args.length === 0 ? true : hasDynamicArgumentTsJs(args[0]),
+      };
+    }
+  }
+  return undefined;
+}
+
+function detectPythonDangerousSink(
+  node: Parser.SyntaxNode
+): { sink: string; hasDynamicArgument: boolean } | undefined {
+  if (node.type !== "call") return undefined;
+  const functionField = node.childForFieldName("function");
+  if (!functionField) return undefined;
+
+  if (functionField.type === "identifier" && PY_EVAL_EXEC_NAMES.has(functionField.text)) {
+    const args = namedArguments(node.childForFieldName("arguments"));
+    return {
+      sink: functionField.text,
+      hasDynamicArgument: args.length === 0 ? true : hasDynamicArgumentPython(args[0]),
+    };
+  }
+
+  if (functionField.type === "attribute") {
+    const objectField = functionField.childForFieldName("object");
+    const attributeField = functionField.childForFieldName("attribute");
+    if (!objectField || !attributeField) return undefined;
+
+    if (objectField.type === "identifier" && objectField.text === "os" && attributeField.text === "system") {
+      const args = namedArguments(node.childForFieldName("arguments"));
+      return {
+        sink: "os.system",
+        hasDynamicArgument: args.length === 0 ? true : hasDynamicArgumentPython(args[0]),
+      };
+    }
+
+    // subprocess.run/call/Popen take an argv LIST by default and are only a
+    // shell-injection risk once `shell=True` opts back into shell
+    // interpretation -- so this only flags the call when a `shell=True`
+    // keyword argument is actually present; the argv-list form (no shell=
+    // kwarg at all) is left alone entirely, not just tagged non-dynamic.
+    if (
+      objectField.type === "identifier" &&
+      objectField.text === "subprocess" &&
+      PY_SHELL_ARG_SINK_NAMES.has(attributeField.text)
+    ) {
+      const args = namedArguments(node.childForFieldName("arguments"));
+      const shellTrueArg = args.find(
+        (arg) =>
+          arg.type === "keyword_argument" &&
+          arg.childForFieldName("name")?.text === "shell" &&
+          arg.childForFieldName("value")?.text === "True"
+      );
+      if (!shellTrueArg) return undefined;
+      const commandArg = args.find((arg) => arg.type !== "keyword_argument");
+      return {
+        sink: `subprocess.${attributeField.text}(shell=True)`,
+        hasDynamicArgument: commandArg ? hasDynamicArgumentPython(commandArg) : true,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+// Go scope note, stated honestly rather than silently narrowed: exec.Command
+// is inherently argv-based -- each argument is passed straight to the child
+// process with no shell involved, so there is no shell-interpolation footgun
+// the way os.system/eval have everywhere else -- UNLESS the code deliberately
+// re-introduces a shell via `exec.Command("sh", "-c", ...)` or
+// `exec.Command("bash", "-c", ...)`, the one place Go code opts back into
+// that same risk. This intentionally does NOT try to catch every indirect
+// path to a shell (a variable holding "sh" passed as the first argument, a
+// wrapper function around exec.Command, etc.) -- only the literal, directly-
+// written three-argument shape verified above by parsing
+// `exec.Command("sh", "-c", cmd)`'s tree. Catching the indirect cases would
+// need real data-flow analysis, which this single-pass per-file AST walk
+// doesn't do anywhere else either.
+function detectGoDangerousSink(
+  node: Parser.SyntaxNode
+): { sink: string; hasDynamicArgument: boolean } | undefined {
+  if (node.type !== "call_expression") return undefined;
+  const functionField = node.childForFieldName("function");
+  if (functionField?.type !== "selector_expression") return undefined;
+  const operandField = functionField.childForFieldName("operand");
+  const fieldField = functionField.childForFieldName("field");
+  if (operandField?.type !== "identifier" || operandField.text !== "exec" || fieldField?.text !== "Command") {
+    return undefined;
+  }
+
+  const args = namedArguments(node.childForFieldName("arguments"));
+  if (args.length < 3) return undefined;
+  const shellName = goStringLiteralValue(args[0]);
+  const flag = goStringLiteralValue(args[1]);
+  if ((shellName !== "sh" && shellName !== "bash") || flag !== "-c") return undefined;
+
+  return {
+    sink: "exec.Command",
+    hasDynamicArgument: goStringLiteralValue(args[2]) === undefined,
+  };
+}
+
 // Builtins that are a genuine structural signal (calling Number.isFinite vs.
 // Array.isArray is a real difference in behavior) rather than an arbitrary
 // naming choice, so they're deliberately excluded from identifier
@@ -467,6 +719,7 @@ async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
   const classes: ParsedClass[] = [];
   const imports: string[] = [];
   const magicNumbers: MagicNumberOccurrence[] = [];
+  const dangerousSinks: DangerousSinkOccurrence[] = [];
 
   const isPython = path.extname(filePath) === ".py";
   const isGo = path.extname(filePath) === ".go";
@@ -512,6 +765,24 @@ async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
       if (!isAllowlistedNumericValue(text) && !isDeclaredConstantValue(effectiveNode, isPython, isGo)) {
         magicNumbers.push({ value: text, line: node.startPosition.row + 1 });
       }
+    }
+
+    // Dangerous-sink detection runs unconditionally too, same reasoning as
+    // magic-number extraction above: a call_expression/new_expression/call
+    // node never also matches the function/class/import dispatch below, so
+    // this is a separate concern rather than another arm of that chain. Only
+    // one of the three per-language detectors ever matches for a given file
+    // (isPython/isGo select the language up front the same way numberTypes
+    // does above), so there's no risk of e.g. the TS detector's
+    // call_expression check firing on a Go call_expression's different
+    // "function" field shape.
+    const sinkMatch = isGo
+      ? detectGoDangerousSink(node)
+      : isPython
+      ? detectPythonDangerousSink(node)
+      : detectTsJsDangerousSink(node);
+    if (sinkMatch) {
+      dangerousSinks.push({ ...sinkMatch, line: node.startPosition.row + 1 });
     }
 
     if (node.type === "function_declaration" || node.type === "function_definition") {
@@ -632,7 +903,7 @@ async function parseFileUnsafe(filePath: string): Promise<ParsedFile> {
     }
   });
 
-  return { functions, classes, imports, magicNumbers };
+  return { functions, classes, imports, magicNumbers, dangerousSinks };
 }
 
 const BRANCH_NODE_TYPES = new Set([

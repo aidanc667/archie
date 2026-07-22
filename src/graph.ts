@@ -357,6 +357,7 @@ export function buildGraph(
       path: relPath,
       loc: entry.loc,
       magicNumbers: entry.parsed.magicNumbers,
+      dangerousSinks: entry.parsed.dangerousSinks,
     };
     nodes.push(fileNode);
 

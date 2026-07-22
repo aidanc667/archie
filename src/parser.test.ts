@@ -164,7 +164,7 @@ describe("parseFile", () => {
   it("does not throw when a file cannot be read, returning an empty result instead", async () => {
     const nonexistentPath = path.resolve("fixtures/parser-basic/does-not-exist.ts");
     const result = await parseFile(nonexistentPath);
-    expect(result).toEqual({ functions: [], classes: [], imports: [], magicNumbers: [] });
+    expect(result).toEqual({ functions: [], classes: [], imports: [], magicNumbers: [], dangerousSinks: [] });
   });
 });
 
@@ -309,6 +309,111 @@ describe("magic number extraction", () => {
     const result = await parseFile(filePath);
     expect(result.magicNumbers.some((m) => m.value === "40" || m.value === "-40")).toBe(false);
     expect(result.magicNumbers).toContainEqual({ value: "-273", line: 14 });
+  });
+});
+
+describe("dangerous sink detection", () => {
+  it("flags a literal-argument `eval` call in TS, with hasDynamicArgument false", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.ts");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks).toContainEqual({ sink: "eval", line: 5, hasDynamicArgument: false });
+  });
+
+  it("flags an identifier-argument `eval` call in TS, with hasDynamicArgument true", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.ts");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks).toContainEqual({ sink: "eval", line: 9, hasDynamicArgument: true });
+  });
+
+  it("flags `new Function(...)` in TS", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.ts");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks).toContainEqual({ sink: "new Function", line: 13, hasDynamicArgument: false });
+  });
+
+  it("flags a literal-argument `execSync` call in TS, with hasDynamicArgument false", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.ts");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks).toContainEqual({ sink: "execSync", line: 17, hasDynamicArgument: false });
+  });
+
+  // The interpolated `${dir}` is exactly the shape that makes execSync a real
+  // injection risk rather than just a discouraged pattern -- a literal
+  // "git status" and an attacker-influenced `rm -rf ${dir}` both call the
+  // same sink, but only one of them lets external input reach a shell.
+  it("flags a template-literal-with-interpolation `execSync` call in TS, with hasDynamicArgument true", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.ts");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks).toContainEqual({ sink: "execSync", line: 21, hasDynamicArgument: true });
+  });
+
+  // execFileSync takes an argv array, not a shell string -- there is no
+  // shell-interpolation footgun the way there is for execSync/exec, so it is
+  // deliberately never flagged. This is also a real regression check: the
+  // "eval(" text inside the preceding comment line must not leak a false
+  // positive either, since detection is AST-based, not text search.
+  it("does not flag `execFileSync` at all", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.ts");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks.some((s) => s.sink === "execFileSync")).toBe(false);
+  });
+
+  it("does not flag the word `eval(` appearing only inside a comment", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.ts");
+    const result = await parseFile(filePath);
+    // The comment sits on the line directly above runExecFileSync's own
+    // execFileSync call; if detection were text-based rather than AST-based,
+    // this line would spuriously produce an "eval" finding.
+    expect(result.dangerousSinks.some((s) => s.line === 24)).toBe(false);
+  });
+
+  it("flags Python `eval`, `exec`, and `os.system` calls", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.py");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks).toContainEqual({ sink: "eval", line: 7, hasDynamicArgument: true });
+    expect(result.dangerousSinks).toContainEqual({ sink: "exec", line: 11, hasDynamicArgument: true });
+    expect(result.dangerousSinks).toContainEqual({ sink: "os.system", line: 15, hasDynamicArgument: true });
+  });
+
+  // subprocess.run/call/Popen take an argv list by default and are only a
+  // shell-injection risk once `shell=True` opts back into shell
+  // interpretation -- so the plain argv-list call must not be flagged, while
+  // the shell=True call must be.
+  it("flags Python `subprocess.run(..., shell=True)` but not the argv-list form", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.py");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks).toContainEqual({
+      sink: "subprocess.run(shell=True)",
+      line: 19,
+      hasDynamicArgument: true,
+    });
+    expect(result.dangerousSinks.some((s) => s.line === 23)).toBe(false);
+  });
+
+  // Go's exec.Command is inherently argv-based -- verified empirically (see
+  // detectDangerousSinks's comment on GO scope below) -- so only the specific
+  // `exec.Command("sh"/"bash", "-c", ...)` shape, where the code deliberately
+  // opts back into shell interpretation, is flagged. A plain argv call like
+  // exec.Command("ls", "-la") is left alone.
+  it("flags Go `exec.Command(\"sh\", \"-c\", ...)` but not a plain argv `exec.Command` call", async () => {
+    const filePath = path.resolve("fixtures/security/sinks.go");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks).toContainEqual({
+      sink: "exec.Command",
+      line: 6,
+      hasDynamicArgument: true,
+    });
+    expect(result.dangerousSinks.some((s) => s.line === 10)).toBe(false);
+  });
+
+  // The real regression case named in the task brief: cli.ts's own git-diff
+  // invocation uses execFileSync (argv-based), never execSync/exec, so
+  // running the actual detection against Archie's own real source must
+  // produce zero dangerous-sink findings for it.
+  it("does not flag any dangerous sink in Archie's own src/cli.ts (real execFileSync usage)", async () => {
+    const filePath = path.resolve("src/cli.ts");
+    const result = await parseFile(filePath);
+    expect(result.dangerousSinks).toEqual([]);
   });
 });
 

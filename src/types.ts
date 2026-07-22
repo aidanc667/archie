@@ -1,5 +1,5 @@
 // src/types.ts
-import type { MagicNumberOccurrence } from "./parser.js";
+import type { MagicNumberOccurrence, DangerousSinkOccurrence } from "./parser.js";
 
 export interface FileNode {
   kind: "file";
@@ -13,6 +13,15 @@ export interface FileNode {
   // this field, and this addition must stay purely additive rather than
   // forcing every one of them to change.
   magicNumbers?: MagicNumberOccurrence[];
+  // Dangerous dynamic-execution sink occurrences found in this file's source
+  // (eval/new Function/execSync/exec in TS/JS, eval/exec/os.system/
+  // subprocess.*(shell=True) in Python, exec.Command("sh"/"bash", "-c", ...)
+  // in Go -- see parser.ts's dangerous-sink detection for the exact rules).
+  // Optional for the same reason magicNumbers above is: dozens of existing
+  // test fixtures construct FileNode literals directly without this field,
+  // and this addition must stay purely additive rather than forcing every
+  // one of them to change.
+  dangerousSinks?: DangerousSinkOccurrence[];
 }
 
 export interface FunctionNode {
